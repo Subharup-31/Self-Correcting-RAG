@@ -413,16 +413,37 @@ def run_query(question: str, config: dict | None = None) -> dict:
 
 
 def stream_query(question: str, config: dict | None = None):
-    """Stream intermediate states (for the SSE pipeline-trace endpoint)."""
-    start = time.time()
+    """Stream intermediate states (for the SSE pipeline-trace endpoint).
+    
+    The final __done__ event now contains the complete final_state so the
+    frontend does NOT need to issue a second POST /api/query to get the answer.
+    """
+    import time as _time
+    start = _time.time()
     state = initial_state(question)
     app = get_app()
+    final_state = state  # will be overwritten by the last node update
+    all_updates: dict = {}
+
     for chunk in app.stream(state, config=config, stream_mode="updates"):
         # Each chunk is {node_name: state_update}
         for node_name, update in chunk.items():
-            elapsed = round(time.time() - start, 3)
+            elapsed = round(_time.time() - start, 3)
             yield {"node": node_name, "update": _safe_update(update), "elapsed": elapsed}
-    yield {"node": "__done__", "update": {}, "elapsed": round(time.time() - start, 3)}
+            # Accumulate updates so we can reconstruct the final state
+            all_updates.update(update)
+
+    # Build the final state from accumulated updates
+    elapsed_total = round(_time.time() - start, 3)
+    final_state = {**state, **all_updates, "processing_time": elapsed_total}
+
+    # Emit __done__ with the full final result embedded
+    yield {
+        "node": "__done__",
+        "update": {},
+        "elapsed": elapsed_total,
+        "final_state": _safe_final_state(final_state),
+    }
 
 
 def _safe_update(update: dict) -> dict:
@@ -441,6 +462,31 @@ def _safe_update(update: dict) -> dict:
             except Exception:
                 safe[k] = str(v)
     return safe
+
+
+def _safe_final_state(state: dict) -> dict:
+    """Serialize the full final state into a JSON-friendly dict matching QueryResponse."""
+    import json
+
+    def _jsonable(v):
+        if isinstance(v, list) and v and hasattr(v[0], "page_content"):
+            return [
+                {
+                    "source": d.metadata.get("source", ""),
+                    "page": d.metadata.get("page"),
+                    "doc_type": d.metadata.get("doc_type"),
+                    "excerpt": d.page_content[:200],
+                    "rerank_score": d.metadata.get("rerank_score"),
+                }
+                for d in v
+            ]
+        try:
+            json.dumps(v)
+            return v
+        except Exception:
+            return str(v)
+
+    return {k: _jsonable(v) for k, v in state.items()}
 
 
 if __name__ == "__main__":

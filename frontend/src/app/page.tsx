@@ -259,7 +259,7 @@ export default function Dashboard() {
     const targetQuery = customQuery || queryInput;
     if (!targetQuery.trim()) return;
 
-    // Push user message into chat
+    // Push user message into chat immediately
     setChatHistory(prev => [...prev, { role: "user", text: targetQuery }]);
     setQueryInput("");
     setLoading(true);
@@ -270,7 +270,7 @@ export default function Dashboard() {
     setIsClarifying(false);
     setOriginalQuestion(targetQuery);
 
-    // Initialize Server-Sent Events (SSE) Stream
+    // SSE stream — pipeline runs ONCE and emits final_state in __done__
     const eventSource = new EventSource(`/api/query/stream?q=${encodeURIComponent(targetQuery)}`);
 
     eventSource.onmessage = (event) => {
@@ -280,7 +280,47 @@ export default function Dashboard() {
         if (data.node === "__done__" || data.node === "__complete__") {
           eventSource.close();
           setStreaming(false);
-          fetchFinalResult(targetQuery);
+          setLoading(false);
+
+          // final_state is embedded in __done__ — no second HTTP call needed
+          const fs = data.final_state;
+          if (fs) {
+            // Map raw state keys → QueryResponse shape
+            const sources: QueryResponse["sources"] = (fs.documents || []).map((doc: any) => ({
+              source: doc.source || doc.metadata?.source || "Unknown",
+              page: doc.page ?? doc.metadata?.page ?? null,
+              doc_type: doc.doc_type || doc.metadata?.doc_type || null,
+              excerpt: doc.excerpt || doc.content || "",
+              rerank_score: doc.rerank_score ?? doc.metadata?.rerank_score ?? null,
+            }));
+
+            const qr: QueryResponse = {
+              query: targetQuery,
+              answer: fs.generation || fs.answer || "No answer generated.",
+              confidence_score: fs.confidence_score ?? 0,
+              low_confidence: fs.low_confidence ?? false,
+              hallucination_free: fs.hallucination_free ?? true,
+              web_search_used: fs.web_search_used ?? false,
+              contradiction_found: fs.contradiction_found ?? false,
+              contradiction_detail: fs.contradiction_detail ?? "",
+              clarification_needed: fs.clarification_needed ?? false,
+              clarification_question: fs.clarification_question ?? "",
+              techniques_used: fs.techniques_used ?? [],
+              crag_state: fs.crag_state ?? "",
+              sources,
+              processing_time: fs.processing_time ?? data.elapsed ?? 0,
+              retry_count: fs.retry_count ?? 0,
+            };
+
+            setResult(qr);
+            if (qr.clarification_needed) setIsClarifying(true);
+            setChatHistory(prev => [...prev, { role: "assistant", text: qr.answer, result: qr }]);
+          } else {
+            // Fallback: backend is old version without embedded final_state — fetch separately
+            fetchFinalResult(targetQuery);
+          }
+          fetchStats();
+
         } else if (data.node === "__error__") {
           eventSource.close();
           setStreaming(false);
@@ -288,9 +328,14 @@ export default function Dashboard() {
           setTraceLog(prev => [...prev, {
             node: "pipeline_error",
             elapsed: data.elapsed || 0,
-            update: { error: data.error }
+            update: { error: data.error || "Unknown pipeline error" },
+          }]);
+          setChatHistory(prev => [...prev, {
+            role: "assistant",
+            text: `⚠️ Pipeline error: ${data.error || "Unknown error. Check Render logs."}`,
           }]);
         } else {
+          // Intermediate node trace event
           setTraceLog(prev => [...prev, data]);
         }
       } catch (err) {
@@ -303,23 +348,28 @@ export default function Dashboard() {
       eventSource.close();
       setStreaming(false);
       setLoading(false);
+      setChatHistory(prev => [...prev, {
+        role: "assistant",
+        text: "⚠️ Could not reach the backend. Make sure the Render service is awake (it may be spinning up — try again in 30 seconds).",
+      }]);
     };
   };
 
+  // Fallback for old backend that doesn't embed final_state in __done__
   const fetchFinalResult = async (queryText: string) => {
     try {
       const res = await axios.post("/api/query", { query: queryText });
       const data: QueryResponse = res.data;
       setResult(data);
-      if (data.clarification_needed) {
-        setIsClarifying(true);
-      }
-      // Append assistant response to chat history
+      if (data.clarification_needed) setIsClarifying(true);
       setChatHistory(prev => [...prev, { role: "assistant", text: data.answer, result: data }]);
       fetchStats();
     } catch (err) {
-      console.error("Failed to fetch final query response", err);
-      setChatHistory(prev => [...prev, { role: "assistant", text: "⚠️ Backend error. Please check that the server is running and all API keys are set correctly in Render.", result: undefined }]);
+      console.error("fetchFinalResult failed", err);
+      setChatHistory(prev => [...prev, {
+        role: "assistant",
+        text: "⚠️ Backend error. Check Render logs and make sure all API keys are set.",
+      }]);
     } finally {
       setLoading(false);
     }
