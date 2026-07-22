@@ -44,7 +44,20 @@ CHROMA_PERSIST_DIR.mkdir(parents=True, exist_ok=True)
 # ============================================================
 class LLMConfig:
     PROVIDER = os.getenv("LLM_PROVIDER", "gemini").lower()
-    MODEL = os.getenv("LLM_MODEL", "gemini-1.5-flash")
+    
+    _env_model = os.getenv("LLM_MODEL", "")
+    if _env_model and _env_model != "gemini-1.5-flash":
+        MODEL = _env_model
+    else:
+        _default_model = "gemini-3.5-flash-lite"
+        if PROVIDER == "nvidia":
+            _default_model = "meta/llama-3.1-70b-instruct"
+        elif PROVIDER == "openai":
+            _default_model = "gpt-4o-mini"
+        elif PROVIDER == "openrouter":
+            _default_model = "meta-llama/llama-3-70b-instruct"
+        MODEL = _default_model
+        
     TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
     GRADER_TEMPERATURE = 0.0          # Graders must be deterministic
     GENERATION_TEMPERATURE = 0.3      # Generation can be slightly creative
@@ -55,10 +68,60 @@ class LLMConfig:
 # Embeddings & Models
 # ============================================================
 class ModelConfig:
-    EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
-    EMBEDDING_DIM = 1024
-    RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-    RERANKER_TOP_K = 5
+    EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "huggingface").lower()
+    
+    _env_emb_model = os.getenv("EMBEDDING_MODEL", "")
+    if _env_emb_model and _env_emb_model != "BAAI/bge-m3":
+        EMBEDDING_MODEL = _env_emb_model
+    else:
+        if EMBEDDING_PROVIDER == "google":
+            EMBEDDING_MODEL = "gemini-embedding-2"
+        elif EMBEDDING_PROVIDER == "openai":
+            EMBEDDING_MODEL = "text-embedding-3-large"
+        elif EMBEDDING_PROVIDER == "nvidia":
+            EMBEDDING_MODEL = "nvidia/nv-embedqa-e5-v5"
+        elif EMBEDDING_PROVIDER == "openrouter":
+            EMBEDDING_MODEL = "openai/text-embedding-3-large"
+        else:
+            EMBEDDING_MODEL = "BAAI/bge-m3"
+
+    _default_dim = 1024
+    if EMBEDDING_PROVIDER == "google":
+        if "gemini-embedding" in EMBEDDING_MODEL:
+            _default_dim = 3072
+        else:
+            _default_dim = 768
+    elif EMBEDDING_PROVIDER == "openai" or EMBEDDING_PROVIDER == "openrouter":
+        if "text-embedding-3-small" in EMBEDDING_MODEL:
+            _default_dim = 1536
+        elif "text-embedding-ada-002" in EMBEDDING_MODEL:
+            _default_dim = 1536
+        else:
+            _default_dim = 3072
+    elif EMBEDDING_PROVIDER == "nvidia":
+        _default_dim = 1024
+    else:
+        if "bge-m3" in EMBEDDING_MODEL:
+            _default_dim = 1024
+        elif "all-MiniLM-L6-v2" in EMBEDDING_MODEL:
+            _default_dim = 384
+
+    EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", str(_default_dim)))
+    
+    RERANKER_PROVIDER = os.getenv("RERANKER_PROVIDER", "huggingface").lower()
+    
+    _env_rerank_model = os.getenv("RERANKER_MODEL", "")
+    if _env_rerank_model and _env_rerank_model != "cross-encoder/ms-marco-MiniLM-L-6-v2":
+        RERANKER_MODEL = _env_rerank_model
+    else:
+        if RERANKER_PROVIDER == "nvidia":
+            RERANKER_MODEL = "nvidia/rerank-qa-mistral-4b"
+        elif RERANKER_PROVIDER == "openrouter":
+            RERANKER_MODEL = "nvidia/llama-nemotron-rerank-vl-1b-v2"
+        else:
+            RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+            
+    RERANKER_TOP_K = int(os.getenv("RERANKER_TOP_K", "5"))
 
 
 # ============================================================
@@ -115,6 +178,14 @@ class _DynamicKeysMeta(type):
     @property
     def TAVILY_API_KEY(cls) -> str:
         return os.getenv("TAVILY_API_KEY", "")
+
+    @property
+    def NVIDIA_API_KEY(cls) -> str:
+        return os.getenv("NVIDIA_API_KEY", "")
+
+    @property
+    def OPENROUTER_API_KEY(cls) -> str:
+        return os.getenv("OPENROUTER_API_KEY", "")
 
 
 class APIKeys(metaclass=_DynamicKeysMeta):

@@ -73,6 +73,32 @@ def _build_openai(temperature: float, model: str = None):
     )
 
 
+def _build_nvidia(temperature: float, model: str = None):
+    """Build an NVIDIA Chat model using ChatOpenAI wrapper (OpenAI-compatible)."""
+    from langchain_openai import ChatOpenAI
+
+    return ChatOpenAI(
+        model=model or LLMConfig.MODEL or "meta/llama-3.1-70b-instruct",
+        api_key=APIKeys.NVIDIA_API_KEY,
+        base_url="https://integrate.api.nvidia.com/v1",
+        temperature=temperature,
+        timeout=60,
+    )
+
+
+def _build_openrouter(temperature: float, model: str = None):
+    """Build an OpenRouter Chat model using ChatOpenAI wrapper (OpenAI-compatible)."""
+    from langchain_openai import ChatOpenAI
+
+    return ChatOpenAI(
+        model=model or LLMConfig.MODEL or "meta-llama/llama-3-70b-instruct",
+        api_key=APIKeys.OPENROUTER_API_KEY,
+        base_url="https://openrouter.ai/api/v1",
+        temperature=temperature,
+        timeout=60,
+    )
+
+
 def _build(provider: str, temperature: float, model: str = None):
     provider = (provider or LLMConfig.PROVIDER).lower()
     if provider == "gemini":
@@ -88,6 +114,18 @@ def _build(provider: str, temperature: float, model: str = None):
                 "OPENAI_API_KEY is not set. Add it to .env."
             )
         return _build_openai(temperature, model)
+    if provider == "nvidia":
+        if not APIKeys.NVIDIA_API_KEY:
+            raise LLMNotConfiguredError(
+                "NVIDIA_API_KEY is not set. Add it to .env."
+            )
+        return _build_nvidia(temperature, model)
+    if provider == "openrouter":
+        if not APIKeys.OPENROUTER_API_KEY:
+            raise LLMNotConfiguredError(
+                "OPENROUTER_API_KEY is not set. Add it to .env."
+            )
+        return _build_openrouter(temperature, model)
     raise ValueError(f"Unknown LLM provider: {provider}")
 
 
