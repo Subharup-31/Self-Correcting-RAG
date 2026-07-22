@@ -20,7 +20,9 @@ import {
   Database,
   BarChart3,
   BookOpen,
-  Info
+  Info,
+  Copy,
+  Check
 } from "lucide-react";
 
 // --- API Helper types ---
@@ -53,6 +55,105 @@ interface TraceEvent {
   node: string;
   elapsed: number;
   update: Record<string, any>;
+}
+
+// ============================================================
+// AssistantMessage — Claude-style chat bubble with toolbar
+// ============================================================
+interface AssistantMessageProps {
+  msg: { role: "user" | "assistant"; text: string; result?: any };
+  idx: number;
+  isLatest: boolean;
+  feedbackGiven: "positive" | "negative" | null;
+  onFeedback: (positive: boolean) => void;
+}
+
+function AssistantMessage({ msg, idx, isLatest, feedbackGiven, onFeedback }: AssistantMessageProps) {
+  const [copied, setCopied] = React.useState(false);
+
+  const copyText = () => {
+    navigator.clipboard.writeText(msg.text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <div className="flex gap-3 justify-start animate-slide-up">
+      {/* Ω Avatar */}
+      <div className="w-8 h-8 rounded-xl bg-[#5e6ad2]/15 border border-[#5e6ad2]/30 flex items-center justify-center shrink-0 mt-0.5">
+        <span className="text-[11px] font-bold text-[#5e6ad2]">Ω</span>
+      </div>
+
+      <div className="flex-1 flex flex-col gap-2 min-w-0 pb-2">
+        {/* Contradiction banner */}
+        {msg.result?.contradiction_found && (
+          <div className="bg-[#ef4444]/10 border border-[#ef4444]/30 rounded-lg px-3 py-2 flex gap-2 text-[11px]">
+            <AlertTriangle className="w-3.5 h-3.5 text-[#ef4444] shrink-0 mt-0.5" />
+            <span className="text-[#ef4444]">{msg.result.contradiction_detail}</span>
+          </div>
+        )}
+
+        {/* Answer text — clean, no box, like Claude */}
+        <div className="text-zinc-200 text-[13px] leading-relaxed">
+          <FormattedAnswer text={msg.text} />
+        </div>
+
+        {/* Source chips */}
+        {msg.result?.sources && msg.result.sources.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mt-1">
+            {msg.result.sources.slice(0, 5).map((src: any, si: number) => (
+              <span key={si} className="text-[10px] text-[#5e6ad2] bg-[#5e6ad2]/10 border border-[#5e6ad2]/20 rounded-md px-2 py-0.5 flex items-center gap-1">
+                <BookOpen className="w-2.5 h-2.5" />
+                {src.source}{src.page ? ` · p.${src.page}` : ""}
+              </span>
+            ))}
+          </div>
+        )}
+
+        {/* Toolbar row — Copy + Thumbs + metadata */}
+        <div className="flex items-center gap-0.5 mt-0.5">
+          <button onClick={copyText} title="Copy response" className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-200 hover:bg-white/5 transition-all">
+            {copied ? <Check className="w-3.5 h-3.5 text-[#10b981]" /> : <Copy className="w-3.5 h-3.5" />}
+          </button>
+
+          {isLatest && (
+            <>
+              <div className="w-px h-3 bg-zinc-700 mx-1" />
+              {feedbackGiven === "positive" ? (
+                <span className="flex items-center gap-1 text-[10px] text-[#10b981] px-1">
+                  <CheckCircle2 className="w-3.5 h-3.5" /> Indexed!
+                </span>
+              ) : feedbackGiven === "negative" ? (
+                <span className="text-[10px] text-zinc-500 px-1">Feedback noted.</span>
+              ) : (
+                <>
+                  <button onClick={() => onFeedback(true)} title="Good response" className="p-1.5 rounded-md text-zinc-500 hover:text-[#10b981] hover:bg-[#10b981]/5 transition-all">
+                    <ThumbsUp className="w-3.5 h-3.5" />
+                  </button>
+                  <button onClick={() => onFeedback(false)} title="Poor response" className="p-1.5 rounded-md text-zinc-500 hover:text-[#ef4444] hover:bg-[#ef4444]/5 transition-all">
+                    <ThumbsDown className="w-3.5 h-3.5" />
+                  </button>
+                </>
+              )}
+            </>
+          )}
+
+          {msg.result && (
+            <div className="flex items-center gap-1.5 ml-2">
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${
+                msg.result.low_confidence ? "text-[#ef4444] bg-[#ef4444]/10" : "text-[#10b981] bg-[#10b981]/10"
+              }`}>
+                {(msg.result.confidence_score * 100).toFixed(0)}%
+              </span>
+              {msg.result.hallucination_free && <span className="text-[9px]">🛡️</span>}
+              {msg.result.web_search_used && <span className="text-[9px]">🌐</span>}
+              <span className="text-[9px] text-zinc-600">{msg.result.processing_time}s</span>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function FormattedAnswer({ text }: { text: string }) {
@@ -627,106 +728,30 @@ export default function Dashboard() {
                     </div>
                   )}
 
-                  {/* Chat bubbles */}
-                  {chatHistory.map((msg, idx) => (
-                    <div key={idx} className={`flex gap-3 ${msg.role === "user" ? "justify-end" : "justify-start"} animate-slide-up`}>
-
-                      {/* Assistant avatar */}
-                      {msg.role === "assistant" && (
-                        <div className="w-8 h-8 rounded-xl bg-[#5e6ad2]/15 border border-[#5e6ad2]/30 flex items-center justify-center shrink-0 mt-1">
-                          <span className="text-[11px] font-bold text-[#5e6ad2]">Ω</span>
-                        </div>
-                      )}
-
-                      <div className={`max-w-[80%] flex flex-col gap-2 ${msg.role === "user" ? "items-end" : "items-start"}`}>
-                        {/* Bubble */}
-                        <div className={`rounded-2xl px-4 py-3 ${
-                          msg.role === "user"
-                            ? "bg-[#5e6ad2] text-white text-xs font-medium rounded-tr-sm"
-                            : "bg-[#131316] border border-[#202024] text-zinc-200 rounded-tl-sm"
-                        }`}>
-                          {msg.role === "user" ? (
-                            <span className="text-xs">{msg.text}</span>
-                          ) : (
-                            <FormattedAnswer text={msg.text} />
-                          )}
-                        </div>
-
-                        {/* Assistant result metadata (chips + sources + feedback) */}
-                        {msg.role === "assistant" && msg.result && (
-                          <div className="flex flex-col gap-2 w-full">
-                            {/* Contradiction banner */}
-                            {msg.result.contradiction_found && (
-                              <div className="bg-[#ef4444]/10 border border-[#ef4444]/30 rounded-lg px-3 py-2 flex gap-2 text-[11px]">
-                                <AlertTriangle className="w-3.5 h-3.5 text-[#ef4444] shrink-0 mt-0.5" />
-                                <span className="text-[#ef4444]">{msg.result.contradiction_detail}</span>
-                              </div>
-                            )}
-
-                            {/* Meta row: confidence + techniques + sources */}
-                            <div className="flex flex-wrap items-center gap-1.5">
-                              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
-                                msg.result.low_confidence
-                                  ? "text-[#ef4444] border-[#ef4444]/30 bg-[#ef4444]/10"
-                                  : "text-[#10b981] border-[#10b981]/30 bg-[#10b981]/10"
-                              }`}>
-                                {(msg.result.confidence_score * 100).toFixed(0)}% confidence
-                              </span>
-                              {msg.result.hallucination_free && (
-                                <span className="text-[10px] text-[#10b981] border border-[#10b981]/20 bg-[#10b981]/10 px-2 py-0.5 rounded-full">🛡️ Grounded</span>
-                              )}
-                              {msg.result.web_search_used && (
-                                <span className="text-[10px] text-[#f59e0b] border border-[#f59e0b]/20 bg-[#f59e0b]/10 px-2 py-0.5 rounded-full">🌐 Web</span>
-                              )}
-                              <span className="text-[10px] text-zinc-500">{msg.result.processing_time}s</span>
-                            </div>
-
-                            {/* Sources */}
-                            {msg.result.sources && msg.result.sources.length > 0 && (
-                              <div className="flex flex-wrap gap-1.5">
-                                {msg.result.sources.slice(0, 4).map((src, si) => (
-                                  <span key={si} className="text-[10px] text-[#5e6ad2] bg-[#5e6ad2]/10 border border-[#5e6ad2]/20 rounded-md px-2 py-0.5 flex items-center gap-1">
-                                    <BookOpen className="w-2.5 h-2.5" />
-                                    {src.source}{src.page ? ` p.${src.page}` : ""}
-                                  </span>
-                                ))}
-                              </div>
-                            )}
-
-                            {/* Feedback row (only for latest assistant message) */}
-                            {idx === chatHistory.length - 1 && (
-                              <div className="flex items-center gap-2">
-                                {feedbackGiven === "positive" ? (
-                                  <span className="text-[11px] text-[#10b981] font-semibold flex items-center gap-1">
-                                    <CheckCircle2 className="w-3.5 h-3.5" /> Indexed!
-                                  </span>
-                                ) : feedbackGiven === "negative" ? (
-                                  <span className="text-[11px] text-zinc-500">Feedback recorded.</span>
-                                ) : (
-                                  <>
-                                    <button onClick={() => handleFeedback(true)} className="flex items-center gap-1 text-[11px] text-zinc-400 hover:text-[#10b981] transition-colors">
-                                      <ThumbsUp className="w-3 h-3" /> Accurate
-                                    </button>
-                                    <span className="text-zinc-600">·</span>
-                                    <button onClick={() => handleFeedback(false)} className="flex items-center gap-1 text-[11px] text-zinc-400 hover:text-[#ef4444] transition-colors">
-                                      <ThumbsDown className="w-3 h-3" /> Poor
-                                    </button>
-                                  </>
-                                )}
-                              </div>
-                            )}
+                  {/* Chat messages */}
+                  {chatHistory.map((msg, idx) => {
+                    const isLatest = idx === chatHistory.length - 1;
+                    if (msg.role === "user") {
+                      return (
+                        <div key={idx} className="flex justify-end animate-slide-up">
+                          <div className="max-w-[70%] bg-[#5e6ad2] text-white text-xs font-medium rounded-2xl rounded-tr-sm px-4 py-3 leading-relaxed">
+                            {msg.text}
                           </div>
-                        )}
-                      </div>
-
-                      {/* User avatar */}
-                      {msg.role === "user" && (
-                        <div className="w-8 h-8 rounded-xl bg-[#5e6ad2] flex items-center justify-center shrink-0 mt-1">
-                          <span className="text-[11px] font-bold text-white">U</span>
                         </div>
-                      )}
-                    </div>
-                  ))}
+                      );
+                    }
+                    return (
+                      <AssistantMessage
+                        key={idx}
+                        msg={msg}
+                        idx={idx}
+                        isLatest={isLatest}
+                        feedbackGiven={feedbackGiven}
+                        onFeedback={handleFeedback}
+                      />
+                    );
+                  })}
+
 
                   {/* Typing indicator while loading */}
                   {loading && (
