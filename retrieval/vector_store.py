@@ -58,29 +58,39 @@ class VectorStore:
                 if self._store is None:
                     from config import QdrantConfig
                     if QdrantConfig.ENDPOINT and QdrantConfig.API_KEY:
+                        import time
                         from langchain_qdrant import QdrantVectorStore
                         from qdrant_client import QdrantClient
                         from qdrant_client.http.models import Distance, VectorParams
 
-                        client = QdrantClient(
-                            url=QdrantConfig.ENDPOINT,
-                            api_key=QdrantConfig.API_KEY,
-                        )
-                        # Ensure collection exists
-                        try:
-                            collections = client.get_collections().collections
-                            collection_names = [c.name for c in collections]
-                            if self.collection_name not in collection_names:
-                                client.create_collection(
-                                    collection_name=self.collection_name,
-                                    vectors_config=VectorParams(
-                                        size=ModelConfig.EMBEDDING_DIM,
-                                        distance=Distance.COSINE
-                                    )
+                        client = None
+                        max_retries = 3
+                        for attempt in range(max_retries):
+                            try:
+                                client = QdrantClient(
+                                    url=QdrantConfig.ENDPOINT,
+                                    api_key=QdrantConfig.API_KEY,
+                                    timeout=30,
                                 )
-                                logger.info(f"Created Qdrant collection: {self.collection_name}")
-                        except Exception as exc:
-                            logger.warning(f"Error checking/creating Qdrant collection: {exc}")
+                                # Ensure collection exists
+                                collections = client.get_collections().collections
+                                collection_names = [c.name for c in collections]
+                                if self.collection_name not in collection_names:
+                                    client.create_collection(
+                                        collection_name=self.collection_name,
+                                        vectors_config=VectorParams(
+                                            size=ModelConfig.EMBEDDING_DIM,
+                                            distance=Distance.COSINE
+                                        )
+                                    )
+                                    logger.info(f"Created Qdrant collection: {self.collection_name}")
+                                break
+                            except Exception as exc:
+                                if attempt == max_retries - 1:
+                                    logger.error(f"Failed to connect to Qdrant Cloud after {max_retries} attempts: {exc}")
+                                    raise exc
+                                logger.warning(f"Qdrant connection attempt {attempt+1} failed ({exc}). Retrying in 2s...")
+                                time.sleep(2)
 
                         self._store = QdrantVectorStore(
                             client=client,
