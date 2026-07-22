@@ -174,15 +174,18 @@ class VectorStore:
 
     @staticmethod
     def _make_id(doc: Document, index: int) -> str:
-        """Stable id: source::page::parent_id::child_index::index"""
+        """Stable id: source::page::parent_id::child_index::index (converted to UUIDv5 for Qdrant)"""
+        import uuid
         m = doc.metadata
-        return ":".join([
+        stable_string = ":".join([
             str(m.get("source", "unknown")),
             str(m.get("page_number", 0)),
             str(m.get("parent_id", "noparent")),
             str(m.get("child_index", index)),
             str(index),
         ])
+        return str(uuid.uuid5(uuid.NAMESPACE_DNS, stable_string))
+
 
 
 # Module-level singleton for convenience
