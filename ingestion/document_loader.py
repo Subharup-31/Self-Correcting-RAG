@@ -81,8 +81,9 @@ class DocumentLoader:
 
         all_docs: List[Document] = []
         for p in sorted(d.rglob("*")):
-            if p.is_file() and p.suffix.lower() in self.SUPPORTED_EXTENSIONS:
-                all_docs.extend(self.load(str(p)))
+            if p.is_file() and not p.name.startswith("."):
+                if p.suffix.lower() in self.SUPPORTED_EXTENSIONS:
+                    all_docs.extend(self.load(str(p)))
         logger.info(f"Loaded {len(all_docs)} total pages from {d}")
         return all_docs
 
