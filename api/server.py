@@ -350,10 +350,20 @@ async def evaluate():
 
 @app.delete("/api/documents")
 async def clear_documents():
-    """Clear all indexed documents from both stores."""
+    """Clear all indexed documents from Chroma/Qdrant and BM25."""
     from ingestion.pipeline import reset_stores
     reset_stores()
-    return {"status": "cleared"}
+    return {"status": "documents_cleared"}
+
+
+@app.delete("/api/fewshot")
+async def clear_fewshot():
+    """Clear all learned few-shot examples from memory, disk, and vector DB."""
+    from graph.chains.few_shot_learner import get_few_shot_learner
+    get_few_shot_learner().clear()
+    return {"status": "fewshot_cleared"}
+
+
 
 
 # ---------------------------------------------------------------- #

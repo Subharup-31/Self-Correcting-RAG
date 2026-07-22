@@ -428,10 +428,13 @@ def stream_query(question: str, config: dict | None = None):
     for chunk in app.stream(state, config=config, stream_mode="updates"):
         # Each chunk is {node_name: state_update}
         for node_name, update in chunk.items():
+            if update is None:
+                update = {}
             elapsed = round(_time.time() - start, 3)
             yield {"node": node_name, "update": _safe_update(update), "elapsed": elapsed}
             # Accumulate updates so we can reconstruct the final state
-            all_updates.update(update)
+            if isinstance(update, dict):
+                all_updates.update(update)
 
     # Build the final state from accumulated updates
     elapsed_total = round(_time.time() - start, 3)
@@ -446,8 +449,10 @@ def stream_query(question: str, config: dict | None = None):
     }
 
 
-def _safe_update(update: dict) -> dict:
+def _safe_update(update: dict | None) -> dict:
     """Make a state update JSON-serializable for streaming."""
+    if not update or not hasattr(update, "items"):
+        return {}
     safe = {}
     for k, v in update.items():
         if isinstance(v, list) and v and hasattr(v[0], "page_content"):

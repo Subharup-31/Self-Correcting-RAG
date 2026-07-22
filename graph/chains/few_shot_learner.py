@@ -308,6 +308,46 @@ class FewShotLearner:
             "sample_queries": [e.query for e in self._examples[-5:]],
         }
 
+    def clear(self) -> None:
+        """Clear all examples from memory, local JSON file, and vector store."""
+        with self._lock:
+            self._examples = []
+            import pathlib
+            p = pathlib.Path(self.persist_path)
+            if p.exists():
+                try:
+                    p.unlink()
+                    logger.info(f"Deleted local few-shot JSON file {p}")
+                except Exception as exc:
+                    logger.warning(f"Could not delete few-shot JSON file: {exc}")
+            
+            try:
+                vs = self._get_vector_store()
+                from langchain_qdrant import QdrantVectorStore
+                if isinstance(vs, QdrantVectorStore):
+                    client = vs.client
+                    client.delete_collection(collection_name=FEWSHOT_COLLECTION)
+                    from qdrant_client.http.models import Distance, VectorParams
+                    from config import ModelConfig
+                    client.create_collection(
+                        collection_name=FEWSHOT_COLLECTION,
+                        vectors_config=VectorParams(
+                            size=ModelConfig.EMBEDDING_DIM,
+                            distance=Distance.COSINE
+                        )
+                    )
+                    logger.info("Cleared Qdrant collection for few-shot examples.")
+                else:
+                    # ChromaDB path
+                    # LangChain Chroma doesn't have a direct clear() in some versions, delete_collection is safer
+                    if hasattr(vs, "_collection"):
+                        # Delete all points or clear collection
+                        vs.delete(ids=None) # deletes all in Chroma
+                    logger.info("Cleared Chroma collection for few-shot examples.")
+            except Exception as exc:
+                logger.warning(f"Few-shot vector store clear failed: {exc}")
+
+
 
 # Module-level singleton
 _learner: Optional[FewShotLearner] = None

@@ -528,7 +528,7 @@ export default function Dashboard() {
   };
 
   const handleClearDocs = async () => {
-    if (!confirm("Are you sure you want to clear all indexed documents? This wipes ChromaDB and BM25!")) return;
+    if (!confirm("Are you sure you want to clear all indexed documents? This wipes ChromaDB, Qdrant, and BM25!")) return;
     try {
       await axios.delete("/api/documents");
       alert("All documents cleared.");
@@ -537,6 +537,18 @@ export default function Dashboard() {
       console.error("Clear failed", err);
     }
   };
+
+  const handleClearFewShot = async () => {
+    if (!confirm("Are you sure you want to clear all learned few-shot examples? This resets the AI's reinforcement memory!")) return;
+    try {
+      await axios.delete("/api/fewshot");
+      alert("AI learned memory reset.");
+      fetchStats();
+    } catch (err) {
+      console.error("Clear memory failed", err);
+    }
+  };
+
 
   const runEvaluation = async () => {
     setEvalLoading(true);
@@ -1025,10 +1037,20 @@ export default function Dashboard() {
 
               {/* Dynamic prompt examples list */}
               <div className="linear-card p-6 flex flex-col gap-4">
-                <h3 className="text-xs font-bold text-white flex items-center gap-2">
-                  <BarChart3 className="w-4 h-4 text-[#5e6ad2]" />
-                  Learned Few-Shot Memory Examples
-                </h3>
+                <div className="flex justify-between items-center">
+                  <h3 className="text-xs font-bold text-white flex items-center gap-2">
+                    <BarChart3 className="w-4 h-4 text-[#5e6ad2]" />
+                    Learned Few-Shot Memory Examples
+                  </h3>
+                  {stats.few_shot_examples > 0 && (
+                    <button
+                      onClick={handleClearFewShot}
+                      className="border border-[#ef4444]/30 hover:border-[#ef4444] text-[#ef4444] hover:bg-[#ef4444]/5 font-medium rounded-lg px-3 py-1.5 text-[10px] transition-all"
+                    >
+                      Reset Memory
+                    </button>
+                  )}
+                </div>
                 <p className="text-xs text-zinc-400">
                   This table shows the queries that users have upvoted/liked. The system semantically matches subsequent queries against these to adapt formatting, vocabulary, and tone automatically.
                 </p>
