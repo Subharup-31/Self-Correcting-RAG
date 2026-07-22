@@ -657,6 +657,14 @@ export default function Dashboard() {
         </div>
       </header>
 
+      {/* Rate Limit Disclaimer Banner */}
+      <div className="border-b border-[#f59e0b]/15 bg-[#f59e0b]/5 px-6 py-2.5 text-[11px] text-[#f59e0b]/90 flex items-center gap-2">
+        <AlertTriangle className="w-4 h-4 text-[#f59e0b] flex-shrink-0" />
+        <span>
+          <strong>Rate Limit Notice:</strong> This platform utilizes free/shared API tiers (e.g. Gemini API, Tavily, etc.) for demonstration purposes. Rapid operations, batch document uploads, or concurrent querying may occasionally trigger rate limit errors.
+        </span>
+      </div>
+
       {/* Main Grid */}
       <div className="flex-1 flex flex-col md:flex-row">
         {/* Navigation Sidebar */}

@@ -29,36 +29,71 @@ This project is a merger of three reference RAG implementations:
 
 ## 🏗 Architecture
 
-```
-Entry → route_question
-  ├─ "direct_llm" → generate → END
-  ├─ "websearch"  → web_search → retrieve → grade_documents → ...
-  └─ "vectorstore" → decompose → retrieve (hybrid+HyDE) → grade_documents
-                                                     │
-                            ┌────────────────────────┼────────────────────────┐
-                        "correct"               "ambiguous"              "incorrect"
-                            │                       │                        │
-                 detect_contradiction        clarify (ask Q)        query_rewrite → retrieve
-                            │                      END                (max 3 retries, then web)
-                     rerank (cross-encoder)
-                            │
-                     few-shot inject
-                            │
-                       generate
-                            │
-                     grade_hallucination ── not grounded ──► regenerate (max 3)
-                            │ grounded
-                     confidence_scorer
-                            │
-                     ┌──────┴──────┐
-                 low_conf       high_conf
-                     │             │
-                END (flag)    grade_answer
-                                   │
-                            ┌──────┴──────┐
-                       not useful     useful
-                            │           │
-                       web_search      END
+```mermaid
+flowchart TD
+    %% Node Definitions
+    Start([Entry])
+    Route{route_question}
+    DirectLLM[Direct LLM Completion]
+    WebSearchNode[Web Search Fallback]
+    Decompose[Query Decomposition]
+    Retrieve[Hybrid Retrieval & HyDE]
+    Grade{Grade Documents}
+    
+    Clarify[Clarify - Ask Question]
+    Rewrite[Query Rewrite & Re-retrieve]
+    Contradiction[Detect Contradiction]
+    
+    Rerank[Cross-Encoder Rerank]
+    FewShot[Inject Few-Shot Context]
+    Generate[Generate Answer]
+    
+    GradeHallucination{Grade Hallucination}
+    Regenerate[Regenerate Answer]
+    ConfidenceScorer{Confidence Scorer}
+    
+    FlagLow[Flag Low Confidence]
+    GradeAnswer{Grade Answer}
+    WebSearchFallback[Web Search Fallback]
+    
+    End([END])
+
+    %% Flow Layout
+    Start --> Route
+    Route -- "direct_llm" --> DirectLLM --> End
+    Route -- "websearch" --> WebSearchNode --> Grade
+    Route -- "vectorstore" --> Decompose --> Retrieve --> Grade
+    
+    Grade -- "ambiguous" --> Clarify --> End
+    Grade -- "incorrect" --> Rewrite
+    Grade -- "correct" --> Contradiction
+    
+    Rewrite -- "Retry Limit Not Met" --> Retrieve
+    Rewrite -- "Retry Limit Exceeded" --> WebSearchNode
+    
+    Contradiction --> Rerank --> FewShot --> Generate --> GradeHallucination
+    
+    GradeHallucination -- "Not Grounded" --> Regenerate -- "Retry Limit Not Met" --> Generate
+    GradeHallucination -- "Retry Limit Exceeded" --> FlagLow
+    GradeHallucination -- "Grounded" --> ConfidenceScorer
+    
+    ConfidenceScorer -- "Confidence < 0.5" --> FlagLow --> End
+    ConfidenceScorer -- "Confidence >= 0.5" --> GradeAnswer
+    
+    GradeAnswer -- "Not Useful" --> WebSearchFallback --> End
+    GradeAnswer -- "Useful" --> End
+
+    %% Styling
+    classDef default fill:#121214,stroke:#333,stroke-width:1px,color:#d4d4d8;
+    classDef highlight fill:#1e1b4b,stroke:#5e6ad2,stroke-width:1.5px,color:#fff;
+    classDef decision fill:#312e81,stroke:#4f46e5,stroke-width:1.5px,color:#fff;
+    classDef startEnd fill:#1c1917,stroke:#78716c,stroke-width:2px,color:#fff;
+    classDef alert fill:#451a03,stroke:#d97706,stroke-width:1.5px,color:#fff;
+
+    class Start,End startEnd;
+    class Route,Grade,GradeHallucination,ConfidenceScorer,GradeAnswer decision;
+    class DirectLLM,WebSearchNode,Decompose,Retrieve,Contradiction,Rerank,FewShot,Generate,WebSearchFallback highlight;
+    class Clarify,Rewrite,Regenerate,FlagLow alert;
 ```
 
 ---
