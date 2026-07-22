@@ -119,9 +119,62 @@ class FewShotLearner:
                 data = json.loads(p.read_text(encoding="utf-8"))
                 self._examples = [FewShotExample(**e) for e in data]
                 logger.info(f"Loaded {len(self._examples)} few-shot examples from {p}")
+            else:
+                self._load_from_vector_store()
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"Could not load few-shot store: {exc}")
             self._examples = []
+
+    def _load_from_vector_store(self) -> None:
+        try:
+            vs = self._get_vector_store()
+            from langchain_qdrant import QdrantVectorStore
+            
+            if isinstance(vs, QdrantVectorStore):
+                logger.info("Qdrant detected for few-shot store. Scrolling collection to restore examples...")
+                client = vs.client
+                offset = None
+                while True:
+                    response = client.scroll(
+                        collection_name=FEWSHOT_COLLECTION,
+                        limit=100,
+                        with_payload=True,
+                        with_vectors=False,
+                        offset=offset,
+                    )
+                    points, next_page_offset = response
+                    for p in points:
+                        payload = p.payload or {}
+                        meta = payload.get("metadata") or {}
+                        if meta.get("query"):
+                            self._examples.append(FewShotExample(
+                                query=meta.get("query"),
+                                answer=meta.get("answer", payload.get("page_content") or ""),
+                                feedback_score=meta.get("feedback_score", 1.0),
+                                timestamp=meta.get("timestamp", ""),
+                                example_id=meta.get("example_id", str(p.id)),
+                            ))
+                    offset = next_page_offset
+                    if not offset or len(points) == 0:
+                        break
+            else:
+                # Chroma path
+                stored = vs.get() if hasattr(vs, "get") else None
+                if stored and stored.get("metadatas"):
+                    for meta in stored["metadatas"]:
+                        if meta and meta.get("query"):
+                            self._examples.append(FewShotExample(
+                                query=meta.get("query"),
+                                answer=meta.get("answer", ""),
+                                feedback_score=meta.get("feedback_score", 1.0),
+                                timestamp=meta.get("timestamp", ""),
+                                example_id=meta.get("example_id", ""),
+                            ))
+            if self._examples:
+                logger.info(f"Restored {len(self._examples)} few-shot examples from vector store.")
+        except Exception as exc:
+            logger.warning(f"Could not restore few-shot examples from vector store: {exc}")
+
 
     def _save(self) -> None:
         try:

@@ -21,6 +21,7 @@ import json
 import shutil
 import tempfile
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
 
@@ -33,6 +34,73 @@ from pydantic import BaseModel, Field
 from config import APIKeys, DOCUMENTS_DIR, ServerConfig
 
 # ---------------------------------------------------------------- #
+# Startup: repopulate BM25 from vector store (survives cold starts)
+# ---------------------------------------------------------------- #
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """On startup, rebuild BM25 from existing Qdrant/Chroma documents."""
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _rebuild_bm25_from_store)
+    except Exception as exc:
+        logger.warning(f"BM25 cold-start rebuild failed (non-fatal): {exc}")
+    yield  # app runs
+
+
+def _rebuild_bm25_from_store():
+    """Pull all stored documents from the vector store and rebuild BM25."""
+    try:
+        from retrieval.vector_store import get_vector_store
+        from retrieval.bm25_retriever import get_bm25_retriever
+        from langchain_core.documents import Document
+        vs = get_vector_store()
+        
+        from langchain_qdrant import QdrantVectorStore
+        docs = []
+        if isinstance(vs.store, QdrantVectorStore):
+            logger.info("Qdrant detected. Scrolling all points to rebuild BM25...")
+            client = vs.store.client
+            collection_name = vs.collection_name
+            offset = None
+            while True:
+                response = client.scroll(
+                    collection_name=collection_name,
+                    limit=100,
+                    with_payload=True,
+                    with_vectors=False,
+                    offset=offset,
+                )
+                points, next_page_offset = response
+                for p in points:
+                    payload = p.payload or {}
+                    page_content = payload.get("page_content") or ""
+                    metadata = payload.get("metadata") or {}
+                    if page_content:
+                        docs.append(Document(page_content=page_content, metadata=metadata))
+                offset = next_page_offset
+                if not offset or len(points) == 0:
+                    break
+            logger.info(f"Qdrant scroll fetched {len(docs)} documents.")
+        else:
+            # ChromaDB path
+            stored = vs.store.get() if hasattr(vs.store, "get") else None
+            if stored and stored.get("documents"):
+                docs = [
+                    Document(page_content=text, metadata=meta)
+                    for text, meta in zip(stored["documents"], stored["metadatas"] or [{}] * len(stored["documents"]))
+                ]
+
+        if docs:
+            get_bm25_retriever().update(docs)
+            logger.info(f"BM25 cold-start repopulated with {len(docs)} docs successfully.")
+        else:
+            logger.info("BM25 cold-start: no existing documents found in vector store.")
+    except Exception as exc:
+        logger.warning(f"BM25 repopulation skipped: {exc}")
+
+
+
+# ---------------------------------------------------------------- #
 # App setup
 # ---------------------------------------------------------------- #
 app = FastAPI(
@@ -40,6 +108,7 @@ app = FastAPI(
     description="A RAG pipeline that detects insufficient/contradictory context "
                 "and self-corrects instead of hallucinating.",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -155,14 +224,21 @@ async def upload_documents(files: List[UploadFile] = File(...)):
         raise HTTPException(status_code=400, detail="No files provided")
 
     DOCUMENTS_DIR.mkdir(parents=True, exist_ok=True)
+    MAX_FILE_SIZE_MB = 20
     results = []
     for f in files:
-        # Save to documents/
+        # Guard against huge files that would OOM the 512MB Render free instance
+        content = await f.read()
+        if len(content) > MAX_FILE_SIZE_MB * 1024 * 1024:
+            results.append({"file": f.filename, "status": "rejected",
+                             "error": f"File exceeds {MAX_FILE_SIZE_MB}MB limit"})
+            continue
+
         safe_name = f"{uuid.uuid4().hex[:8]}_{Path(f.filename).name}"
         dest = DOCUMENTS_DIR / safe_name
         try:
             with dest.open("wb") as out:
-                shutil.copyfileobj(f.file, out)
+                out.write(content)
         except Exception as exc:
             logger.warning(f"Failed to save {f.filename}: {exc}")
             results.append({"file": f.filename, "status": "save_failed", "error": str(exc)})
