@@ -23,6 +23,7 @@ failed, produce a SINGLE rewritten query that:
 - Uses different vocabulary / synonyms that might match document wording
 - Removes conversational filler
 - Stays focused on the same information need
+- CRITICAL: If the original question contains words like "my", "this document", "uploaded file", or references a specific user context (like "my idea", "my project"), DO NOT generalize it into an academic explanation query (e.g. do not turn "my problem statement" into "how to write a thesis problem statement"). Keep the search query focused on extracting details from the user's specific project files.
 
 Output ONLY the rewritten query, nothing else."""
 

@@ -110,15 +110,13 @@ def grade_documents(state: GraphState) -> GraphState:
     # Aggregation → CRAG state.
     if not documents or not kept:
         crag_state = "incorrect"
-    elif grades["incorrect"] == 0 and grades["ambiguous"] > 0:
-        crag_state = "ambiguous"
-    elif grades["incorrect"] > 0 and grades["correct"] == 0:
-        crag_state = "incorrect"
-    elif grades["incorrect"] >= grades["correct"]:
-        # Majority irrelevant.
-        crag_state = "incorrect"
-    else:
+    elif grades["correct"] > 0:
         crag_state = "correct"
+    elif grades["ambiguous"] > 0:
+        crag_state = "ambiguous"
+    else:
+        crag_state = "incorrect"
+
 
     techniques = list(state.get("techniques_used", []))
     if "CRAG (3-state grading)" not in techniques:

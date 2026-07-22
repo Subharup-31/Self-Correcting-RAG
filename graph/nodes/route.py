@@ -39,13 +39,14 @@ Choose:
 - "vectorstore": the question is about specific facts, concepts, definitions, \
 comparisons, or information that would be found in a document collection. \
 Topics like AI, RAG, retrieval, embeddings, finance reports, technical manuals, \
-company information, research notes, Nexora Technologies.
+company information, research notes, Nexora Technologies, hackathon details, \
+or ANY question referencing "my", "the document", "uploaded file", "this presentation", "my idea".
 - "websearch": the question needs real-time, current, or frequently-updating \
-information — news, stock prices, today's weather, recent events, live data.
+information — news, stock prices, today's weather, recent events, live data (unless it is about the user's uploaded project/idea, in which case default to vectorstore).
 - "direct_llm": the question is conversational, a greeting, simple math, \
 opinion, or general chit-chat that does not require document retrieval.
 
-Default to "vectorstore" when in doubt about factual/conceptual questions."""
+Default to "vectorstore" when in doubt about factual/conceptual questions. Always default to "vectorstore" if the user mentions "my idea" or "my project" or "my document"."""
 
 ROUTER_HUMAN = "Question to route: {question}"
 
