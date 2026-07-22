@@ -133,10 +133,12 @@ class VectorStore:
         if not query.strip():
             return []
         try:
-            return self.store.similarity_search_with_relevance_scores(query, k=k)
+            results = self.store.similarity_search_with_relevance_scores(query, k=k)
+            return [d for d, _ in results]
         except Exception:
             # Fallback if relevance scores not supported
             return self.store.similarity_search(query, k=k)
+
 
     def search_with_scores(self, query: str, k: int = RetrievalConfig.VECTOR_TOP_K):
         """Return (Document, score) tuples sorted by similarity."""
