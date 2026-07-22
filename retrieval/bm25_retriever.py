@@ -31,7 +31,7 @@ class BM25Retriever:
     """Keyword (lexical) retriever over a fixed document corpus."""
 
     def __init__(self, documents: List[Document] | None = None):
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self.documents: List[Document] = []
         self._corpus: List[List[str]] = []
         self.bm25 = None

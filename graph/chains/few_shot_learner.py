@@ -52,7 +52,7 @@ class FewShotLearner:
     def __init__(self, persist_path: str = str(FEW_SHOT_STORE), top_k: int = 2):
         self.persist_path = persist_path
         self.top_k = top_k
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._examples: List[FewShotExample] = []
         self._vector_store = None
         self._load()

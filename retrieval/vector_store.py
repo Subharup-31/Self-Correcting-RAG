@@ -47,7 +47,7 @@ class VectorStore:
         self.persist_dir = persist_dir
         self.collection_name = collection_name
         self._embeddings = embeddings or get_embeddings()
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._store = None
         # Will lazily connect on first use.
 
