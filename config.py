@@ -13,6 +13,19 @@ from dotenv import load_dotenv
 # Load .env from project root (idempotent)
 load_dotenv()
 
+# Monkeypatch socket.getaddrinfo to resolve Qdrant Cloud domain name directly to IP
+# due to unstable local DNS resolver issues on the macOS host
+import socket
+_orig_getaddrinfo = socket.getaddrinfo
+
+def _custom_getaddrinfo(host, port, *args, **kwargs):
+    if host == "197cde2c-b60c-4e50-8623-54c2f729cddb.eu-west-1-0.aws.cloud.qdrant.io":
+        # Resolve to the verified IP of the cluster
+        return _orig_getaddrinfo("54.78.151.125", port, *args, **kwargs)
+    return _orig_getaddrinfo(host, port, *args, **kwargs)
+
+socket.getaddrinfo = _custom_getaddrinfo
+
 # ============================================================
 # Paths
 # ============================================================

@@ -51,7 +51,11 @@ class HyDERetriever:
         chain = self.prompt | self.llm
         try:
             response = chain.invoke({"question": query})
-            text = response.content if hasattr(response, "content") else str(response)
+            content = response.content if hasattr(response, "content") else response
+            if isinstance(content, list):
+                text = "".join(chunk.get("text", "") if isinstance(chunk, dict) else str(chunk) for chunk in content)
+            else:
+                text = str(content)
             logger.debug(f"HyDE hypothetical doc: {text[:120]}...")
             return text.strip()
         except Exception as exc:  # noqa: BLE001
