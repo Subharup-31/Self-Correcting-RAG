@@ -88,6 +88,34 @@ class FewShotLearner:
                             )
                         )
                         logger.info(f"Created Qdrant collection: {FEWSHOT_COLLECTION}")
+                    else:
+                        try:
+                            coll_info = client.get_collection(FEWSHOT_COLLECTION)
+                            vectors_config = coll_info.config.params.vectors
+                            current_size = None
+                            if hasattr(vectors_config, "size"):
+                                current_size = vectors_config.size
+                            elif isinstance(vectors_config, dict):
+                                current_size = vectors_config.get("size")
+                            else:
+                                current_size = getattr(vectors_config, "size", None)
+                                
+                            if current_size and current_size != ModelConfig.EMBEDDING_DIM:
+                                logger.warning(
+                                    f"Vector dimension mismatch in few-shot collection {FEWSHOT_COLLECTION}: "
+                                    f"DB has {current_size}, config expects {ModelConfig.EMBEDDING_DIM}. "
+                                    "Recreating collection to avoid API errors..."
+                                )
+                                client.delete_collection(FEWSHOT_COLLECTION)
+                                client.create_collection(
+                                    collection_name=FEWSHOT_COLLECTION,
+                                    vectors_config=VectorParams(
+                                        size=ModelConfig.EMBEDDING_DIM,
+                                        distance=Distance.COSINE
+                                    )
+                                )
+                        except Exception as e:
+                            logger.warning(f"Failed to verify Qdrant few-shot collection dimensions: {e}")
                 except Exception as exc:
                     logger.warning(f"Error checking/creating Qdrant few-shot collection: {exc}")
 
