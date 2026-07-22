@@ -1,0 +1,43 @@
+# Virtual environment
+.venv/
+venv/
+ENV/
+env/
+
+# Python cache and temporary files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Vector database local storage
+chroma_db/
+qdrant_db/
+few_shot_chroma/
+
+# Environment variables (sensitive data!)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Node.js dependencies and builds
+node_modules/
+.next/
+out/
+build/
+dist/
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# OS-specific metadata files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
