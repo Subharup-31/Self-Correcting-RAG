@@ -306,9 +306,12 @@ export default function Dashboard() {
   const traceEndRef = useRef<HTMLDivElement>(null);
 
   // Document Upload state
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [files, setFiles] = useState<FileList | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string>("");
   const [uploadResults, setUploadResults] = useState<any[]>([]);
+
 
   // Eval harness state
   const [evalLoading, setEvalLoading] = useState(false);
@@ -503,6 +506,23 @@ export default function Dashboard() {
     }
   };
 
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = () => {
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      setFiles(e.dataTransfer.files);
+    }
+  };
+
   const handleFileUpload = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!files || files.length === 0) return;
@@ -520,6 +540,8 @@ export default function Dashboard() {
       });
       setUploadResults(res.data.results);
       setUploadStatus("Ingestion completed!");
+      setFiles(null);
+      if (fileInputRef.current) fileInputRef.current.value = "";
       fetchStats();
     } catch (err) {
       console.error("Upload failed", err);
@@ -932,16 +954,58 @@ export default function Dashboard() {
                 </p>
 
                 <form onSubmit={handleFileUpload} className="flex flex-col gap-4">
-                  <div className="border-2 border-dashed border-[#202024] hover:border-[#5e6ad2] rounded-lg p-8 flex flex-col items-center justify-center gap-3 transition-all cursor-pointer">
-                    <UploadCloud className="w-10 h-10 text-zinc-500" />
+                  <div
+                    onDragOver={handleDragOver}
+                    onDragLeave={handleDragLeave}
+                    onDrop={handleDrop}
+                    onClick={() => fileInputRef.current?.click()}
+                    className={`border-2 border-dashed rounded-lg p-10 flex flex-col items-center justify-center gap-3 transition-all cursor-pointer select-none ${
+                      isDragging
+                        ? "border-[#5e6ad2] bg-[#5e6ad2]/10 scale-[1.01]"
+                        : "border-[#202024] hover:border-[#5e6ad2] hover:bg-white/[0.01]"
+                    }`}
+                  >
+                    <UploadCloud className={`w-10 h-10 transition-colors ${isDragging ? "text-[#5e6ad2]" : "text-zinc-500"}`} />
                     <input
+                      ref={fileInputRef}
                       type="file"
                       multiple
                       onChange={(e) => setFiles(e.target.files)}
-                      className="text-xs text-zinc-400"
+                      className="hidden"
                     />
-                    <p className="text-[10px] text-zinc-500">Supports PDF, DOCX, TXT, PNG, JPG</p>
+                    <p className="text-xs font-medium text-zinc-300">
+                      {isDragging ? "Drop your files here!" : "Drag & drop files here, or click to browse"}
+                    </p>
+                    <p className="text-[10px] text-zinc-500">Supports PDF, DOCX, TXT, PNG, JPG (Max 20MB)</p>
                   </div>
+
+                  {/* Selected files feedback list */}
+                  {files && files.length > 0 && (
+                    <div className="bg-[#121214] border border-[#202024] rounded-lg p-3 flex flex-col gap-2">
+                      <div className="flex justify-between items-center border-b border-[#202024] pb-1.5 mb-1">
+                        <span className="text-[10px] uppercase font-bold text-zinc-400">Selected Files ({files.length})</span>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setFiles(null);
+                            if (fileInputRef.current) fileInputRef.current.value = "";
+                          }}
+                          className="text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors"
+                        >
+                          Clear Selection
+                        </button>
+                      </div>
+                      <div className="max-h-32 overflow-y-auto flex flex-col gap-1.5 pr-1">
+                        {Array.from(files).map((f, fi) => (
+                          <div key={fi} className="flex justify-between items-center text-xs text-zinc-300 bg-[#09090b] px-2.5 py-1.5 rounded border border-[#1a1a1e]">
+                            <span className="truncate pr-4">{f.name}</span>
+                            <span className="text-[10px] text-zinc-500 shrink-0">{(f.size / (1024 * 1024)).toFixed(2)} MB</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   <div className="flex gap-2">
                     <button
