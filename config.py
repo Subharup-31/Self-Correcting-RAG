@@ -13,18 +13,17 @@ from dotenv import load_dotenv
 # Load .env from project root (idempotent)
 load_dotenv()
 
-# Monkeypatch socket.getaddrinfo to resolve Qdrant Cloud domain name directly to IP
-# due to unstable local DNS resolver issues on the macOS host
-import socket
-_orig_getaddrinfo = socket.getaddrinfo
+# Only apply custom socket monkeypatch if explicitly enabled via environment variable
+if os.getenv("ENABLE_SOCKET_MONKEYPATCH", "false").lower() == "true":
+    import socket
+    _orig_getaddrinfo = socket.getaddrinfo
 
-def _custom_getaddrinfo(host, port, *args, **kwargs):
-    if host == "197cde2c-b60c-4e50-8623-54c2f729cddb.eu-west-1-0.aws.cloud.qdrant.io":
-        # Resolve to the verified IP of the cluster
-        return _orig_getaddrinfo("54.78.151.125", port, *args, **kwargs)
-    return _orig_getaddrinfo(host, port, *args, **kwargs)
+    def _custom_getaddrinfo(host, port, *args, **kwargs):
+        if host == "197cde2c-b60c-4e50-8623-54c2f729cddb.eu-west-1-0.aws.cloud.qdrant.io":
+            return _orig_getaddrinfo("54.78.151.125", port, *args, **kwargs)
+        return _orig_getaddrinfo(host, port, *args, **kwargs)
 
-socket.getaddrinfo = _custom_getaddrinfo
+    socket.getaddrinfo = _custom_getaddrinfo
 
 # ============================================================
 # Paths
@@ -98,21 +97,45 @@ class SelfCorrectionConfig:
 
 
 # ============================================================
-# API keys (resolved at import)
+# Dynamic API keys getter
 # ============================================================
-class APIKeys:
-    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
-    GOOGLE_API_KEY_FALLBACK = os.getenv("GOOGLE_API_KEY_FALLBACK", "")
-    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-    TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+class _DynamicKeysMeta(type):
+    @property
+    def GOOGLE_API_KEY(cls) -> str:
+        return os.getenv("GOOGLE_API_KEY", "")
+
+    @property
+    def GOOGLE_API_KEY_FALLBACK(cls) -> str:
+        return os.getenv("GOOGLE_API_KEY_FALLBACK", "")
+
+    @property
+    def OPENAI_API_KEY(cls) -> str:
+        return os.getenv("OPENAI_API_KEY", "")
+
+    @property
+    def TAVILY_API_KEY(cls) -> str:
+        return os.getenv("TAVILY_API_KEY", "")
+
+
+class APIKeys(metaclass=_DynamicKeysMeta):
+    pass
 
 
 # ============================================================
-# Qdrant Configuration
+# Dynamic Qdrant Configuration
 # ============================================================
-class QdrantConfig:
-    ENDPOINT = os.getenv("QDRANT_ENDPOINT", "")
-    API_KEY = os.getenv("QDRANT_API_KEY", "")
+class _DynamicQdrantMeta(type):
+    @property
+    def ENDPOINT(cls) -> str:
+        return os.getenv("QDRANT_ENDPOINT", "")
+
+    @property
+    def API_KEY(cls) -> str:
+        return os.getenv("QDRANT_API_KEY", "")
+
+
+class QdrantConfig(metaclass=_DynamicQdrantMeta):
+    pass
 
 
 # ============================================================

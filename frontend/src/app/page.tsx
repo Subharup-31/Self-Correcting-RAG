@@ -183,6 +183,11 @@ export default function Dashboard() {
     sample_queries: [] as string[]
   });
 
+  // Chat history
+  type ChatMessage = { role: "user" | "assistant"; text: string; result?: QueryResponse };
+  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
   // Query State
   const [queryInput, setQueryInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -191,10 +196,10 @@ export default function Dashboard() {
   const [isClarifying, setIsClarifying] = useState(false);
   const [originalQuestion, setOriginalQuestion] = useState("");
 
-  // Result state
+  // Result state (for clarification logic)
   const [result, setResult] = useState<QueryResponse | null>(null);
   const [feedbackGiven, setFeedbackGiven] = useState<"positive" | "negative" | null>(null);
-  
+
   // Pipeline trace streaming state
   const [traceLog, setTraceLog] = useState<TraceEvent[]>([]);
   const traceEndRef = useRef<HTMLDivElement>(null);
@@ -218,6 +223,11 @@ export default function Dashboard() {
   useEffect(() => {
     traceEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [traceLog]);
+
+  // Scroll chat to bottom when history changes
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatHistory, loading]);
 
   const fetchHealth = async () => {
     try {
@@ -249,6 +259,9 @@ export default function Dashboard() {
     const targetQuery = customQuery || queryInput;
     if (!targetQuery.trim()) return;
 
+    // Push user message into chat
+    setChatHistory(prev => [...prev, { role: "user", text: targetQuery }]);
+    setQueryInput("");
     setLoading(true);
     setStreaming(true);
     setResult(null);
@@ -259,15 +272,14 @@ export default function Dashboard() {
 
     // Initialize Server-Sent Events (SSE) Stream
     const eventSource = new EventSource(`/api/query/stream?q=${encodeURIComponent(targetQuery)}`);
-    
+
     eventSource.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        
+
         if (data.node === "__done__" || data.node === "__complete__") {
           eventSource.close();
           setStreaming(false);
-          // Fetch final result synchronously
           fetchFinalResult(targetQuery);
         } else if (data.node === "__error__") {
           eventSource.close();
@@ -279,7 +291,6 @@ export default function Dashboard() {
             update: { error: data.error }
           }]);
         } else {
-          // Append intermediate update
           setTraceLog(prev => [...prev, data]);
         }
       } catch (err) {
@@ -298,13 +309,17 @@ export default function Dashboard() {
   const fetchFinalResult = async (queryText: string) => {
     try {
       const res = await axios.post("/api/query", { query: queryText });
-      setResult(res.data);
-      if (res.data.clarification_needed) {
+      const data: QueryResponse = res.data;
+      setResult(data);
+      if (data.clarification_needed) {
         setIsClarifying(true);
       }
-      fetchStats(); // Update stats in case few-shots changed
+      // Append assistant response to chat history
+      setChatHistory(prev => [...prev, { role: "assistant", text: data.answer, result: data }]);
+      fetchStats();
     } catch (err) {
       console.error("Failed to fetch final query response", err);
+      setChatHistory(prev => [...prev, { role: "assistant", text: "⚠️ Backend error. Please check that the server is running and all API keys are set correctly in Render.", result: undefined }]);
     } finally {
       setLoading(false);
     }
@@ -518,271 +533,229 @@ export default function Dashboard() {
         </nav>
 
         {/* Content panel */}
-        <main className="flex-1 flex flex-col p-6 overflow-y-auto">
+        <main className="flex-1 flex flex-col overflow-hidden">
           {/* Tab 1: Interactive Console */}
           {activeTab === "query" && (
-            <div className="flex-1 flex flex-col xl:flex-row gap-6">
-              {/* Left pane: Query Inputs */}
-              <div className="flex-1 flex flex-col gap-6">
-                <div className="linear-card p-6 flex flex-col gap-4">
-                  <h2 className="text-sm font-semibold text-white flex items-center gap-2">
-                    <Sparkles className="w-4 h-4 text-[#5e6ad2]" />
-                    Run Self-Correcting RAG
-                  </h2>
-                  <p className="text-xs text-zinc-400 leading-relaxed">
-                    Enter a question to trace the agentic execution. The system will evaluate document accuracy, 
-                    contradiction states, and automatically decide on web searches or clarification steps.
-                  </p>
+            <div className="flex-1 flex flex-col xl:flex-row h-full overflow-hidden">
 
-                  <form onSubmit={(e) => handleQuerySubmit(e)} className="flex gap-2">
-                    <input
-                      type="text"
-                      value={queryInput}
-                      onChange={(e) => setQueryInput(e.target.value)}
-                      placeholder="Ask a question about the manual or financial data..."
-                      disabled={loading}
-                      className="flex-1 bg-[#09090b] border border-[#202024] focus:border-[#5e6ad2] focus:outline-none rounded-lg px-4 py-2.5 text-xs text-white placeholder-zinc-500 transition-all"
-                    />
-                    <button
-                      type="submit"
-                      disabled={loading || !queryInput.trim()}
-                      className="bg-[#5e6ad2] hover:bg-[#707df0] disabled:bg-[#5e6ad2]/40 disabled:cursor-not-allowed text-white font-medium rounded-lg px-4 py-2.5 text-xs flex items-center gap-2 transition-all shadow-lg shadow-[#5e6ad2]/10"
-                    >
-                      {loading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
-                      Execute
-                    </button>
-                  </form>
+              {/* LEFT: Chat Area (ChatGPT-style) */}
+              <div className="flex-1 flex flex-col overflow-hidden border-r border-[#202024]">
 
-                  {/* Suggest queries */}
-                  <div>
-                    <h3 className="text-[10px] uppercase font-bold tracking-widest text-zinc-500 mb-2">Preset Scenarios</h3>
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        onClick={(e) => {
-                          setQueryInput("What is HyDE and how does it improve retrieval?");
-                          handleQuerySubmit(e, "What is HyDE and how does it improve retrieval?");
-                        }}
-                        className="bg-[#121214] hover:bg-[#1c1c1f] text-zinc-300 border border-[#202024] rounded-lg px-3 py-1.5 text-[11px] transition-all"
-                      >
-                        🎯 Standard RAG (Factual)
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          setQueryInput("What was the company's revenue in 2024?");
-                          handleQuerySubmit(e, "What was the company's revenue in 2024?");
-                        }}
-                        className="bg-[#121214] hover:bg-[#1c1c1f] text-zinc-300 border border-[#202024] rounded-lg px-3 py-1.5 text-[11px] transition-all"
-                      >
-                        ⚡ Contradiction Check
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          setQueryInput("Tell me about the main issues.");
-                          handleQuerySubmit(e, "Tell me about the main issues.");
-                        }}
-                        className="bg-[#121214] hover:bg-[#1c1c1f] text-zinc-300 border border-[#202024] rounded-lg px-3 py-1.5 text-[11px] transition-all"
-                      >
-                        ⚠️ Ambiguous (Clarification)
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          setQueryInput("What is today's stock price of Apple?");
-                          handleQuerySubmit(e, "What is today's stock price of Apple?");
-                        }}
-                        className="bg-[#121214] hover:bg-[#1c1c1f] text-zinc-300 border border-[#202024] rounded-lg px-3 py-1.5 text-[11px] transition-all"
-                      >
-                        🌐 Web Search Fallback
-                      </button>
-                    </div>
-                  </div>
-                </div>
+                {/* Scrollable chat messages */}
+                <div className="flex-1 overflow-y-auto px-6 py-6 flex flex-col gap-6">
 
-                {/* Final Result Render */}
-                {result && (
-                  <div className="linear-card p-6 flex flex-col gap-5 animate-slide-up">
-                    <div className="flex items-center justify-between border-b border-[#202024] pb-4">
+                  {/* Empty state */}
+                  {chatHistory.length === 0 && !loading && (
+                    <div className="flex-1 flex flex-col items-center justify-center gap-4 text-center py-20">
+                      <div className="w-16 h-16 rounded-2xl bg-[#5e6ad2]/10 border border-[#5e6ad2]/20 flex items-center justify-center">
+                        <Sparkles className="w-8 h-8 text-[#5e6ad2]" />
+                      </div>
                       <div>
-                        <h2 className="text-sm font-semibold text-white">Execution Result</h2>
-                        <p className="text-[10px] text-zinc-400 mt-1">Processed in {result.processing_time}s</p>
+                        <h2 className="text-base font-semibold text-white">Self-Correcting RAG</h2>
+                        <p className="text-xs text-zinc-400 mt-1 max-w-xs">
+                          Ask anything. The pipeline automatically routes, retrieves, detects contradictions, and self-corrects.
+                        </p>
                       </div>
-
-                      {/* Confidence Score Gauge */}
-                      <div className="flex items-center gap-3">
-                        <div className="text-right">
-                          <p className="text-[10px] text-zinc-400">Confidence Score</p>
-                          <p className={`text-xs font-bold ${result.low_confidence ? "text-[#ef4444]" : "text-[#10b981]"}`}>
-                            {(result.confidence_score * 100).toFixed(0)}% {result.low_confidence ? "(Low)" : "(High)"}
-                          </p>
-                        </div>
-                        <div className="w-12 h-12 rounded-full border-4 border-[#202024] flex items-center justify-center relative">
-                          <span className="text-[11px] font-bold text-zinc-300">{(result.confidence_score * 100).toFixed(0)}</span>
-                          <svg className="absolute top-[-4px] left-[-4px] w-[56px] h-[56px] rotate-[-90deg]">
-                            <circle
-                              cx="28"
-                              cy="28"
-                              r="24"
-                              fill="none"
-                              stroke={result.low_confidence ? "#ef4444" : "#10b981"}
-                              strokeWidth="4"
-                              strokeDasharray="150"
-                              strokeDashoffset={150 - (150 * result.confidence_score)}
-                              className="transition-all duration-1000"
-                            />
-                          </svg>
-                        </div>
+                      {/* Preset chips */}
+                      <div className="flex flex-wrap gap-2 justify-center mt-2">
+                        {[
+                          { label: "🎯 HyDE & Retrieval", q: "What is HyDE and how does it improve retrieval?" },
+                          { label: "⚡ Revenue conflict", q: "What was the company's revenue in 2024?" },
+                          { label: "⚠️ Vague question", q: "Tell me about the main issues." },
+                          { label: "🌐 Live web price", q: "What is today's stock price of Apple?" },
+                        ].map(({ label, q }) => (
+                          <button
+                            key={label}
+                            onClick={(e) => handleQuerySubmit(e, q)}
+                            disabled={loading}
+                            className="bg-[#121214] hover:bg-[#1c1c1f] disabled:opacity-40 text-zinc-300 border border-[#202024] rounded-full px-4 py-1.5 text-[11px] transition-all"
+                          >
+                            {label}
+                          </button>
+                        ))}
                       </div>
                     </div>
+                  )}
 
-                    {/* Contradiction Warning */}
-                    {result.contradiction_found && (
-                      <div className="bg-[#ef4444]/10 border border-[#ef4444]/30 rounded-lg p-4 flex gap-3 text-xs text-[#fafafa] leading-relaxed">
-                        <AlertTriangle className="w-5 h-5 text-[#ef4444] shrink-0" />
-                        <div>
-                          <p className="font-semibold text-[#ef4444] mb-1">Factual Contradiction Detected</p>
-                          <p>{result.contradiction_detail}</p>
-                          <p className="text-[10px] text-zinc-400 mt-2">
-                            The system identified contradictory facts between the sources and forced the generator to explain the disagreement rather than guess.
-                          </p>
+                  {/* Chat bubbles */}
+                  {chatHistory.map((msg, idx) => (
+                    <div key={idx} className={`flex gap-3 ${msg.role === "user" ? "justify-end" : "justify-start"} animate-slide-up`}>
+
+                      {/* Assistant avatar */}
+                      {msg.role === "assistant" && (
+                        <div className="w-8 h-8 rounded-xl bg-[#5e6ad2]/15 border border-[#5e6ad2]/30 flex items-center justify-center shrink-0 mt-1">
+                          <span className="text-[11px] font-bold text-[#5e6ad2]">Ω</span>
                         </div>
-                      </div>
-                    )}
+                      )}
 
-                    {/* Clarification prompt */}
-                    {isClarifying && (
-                      <div className="bg-[#f59e0b]/10 border border-[#f59e0b]/30 rounded-lg p-4 flex flex-col gap-3">
-                        <div className="flex gap-3 text-xs">
-                          <Info className="w-5 h-5 text-[#f59e0b] shrink-0" />
-                          <div>
-                            <p className="font-semibold text-[#f59e0b] mb-1">Clarification Required</p>
-                            <p>{result.clarification_question}</p>
+                      <div className={`max-w-[80%] flex flex-col gap-2 ${msg.role === "user" ? "items-end" : "items-start"}`}>
+                        {/* Bubble */}
+                        <div className={`rounded-2xl px-4 py-3 ${
+                          msg.role === "user"
+                            ? "bg-[#5e6ad2] text-white text-xs font-medium rounded-tr-sm"
+                            : "bg-[#131316] border border-[#202024] text-zinc-200 rounded-tl-sm"
+                        }`}>
+                          {msg.role === "user" ? (
+                            <span className="text-xs">{msg.text}</span>
+                          ) : (
+                            <FormattedAnswer text={msg.text} />
+                          )}
+                        </div>
+
+                        {/* Assistant result metadata (chips + sources + feedback) */}
+                        {msg.role === "assistant" && msg.result && (
+                          <div className="flex flex-col gap-2 w-full">
+                            {/* Contradiction banner */}
+                            {msg.result.contradiction_found && (
+                              <div className="bg-[#ef4444]/10 border border-[#ef4444]/30 rounded-lg px-3 py-2 flex gap-2 text-[11px]">
+                                <AlertTriangle className="w-3.5 h-3.5 text-[#ef4444] shrink-0 mt-0.5" />
+                                <span className="text-[#ef4444]">{msg.result.contradiction_detail}</span>
+                              </div>
+                            )}
+
+                            {/* Meta row: confidence + techniques + sources */}
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                                msg.result.low_confidence
+                                  ? "text-[#ef4444] border-[#ef4444]/30 bg-[#ef4444]/10"
+                                  : "text-[#10b981] border-[#10b981]/30 bg-[#10b981]/10"
+                              }`}>
+                                {(msg.result.confidence_score * 100).toFixed(0)}% confidence
+                              </span>
+                              {msg.result.hallucination_free && (
+                                <span className="text-[10px] text-[#10b981] border border-[#10b981]/20 bg-[#10b981]/10 px-2 py-0.5 rounded-full">🛡️ Grounded</span>
+                              )}
+                              {msg.result.web_search_used && (
+                                <span className="text-[10px] text-[#f59e0b] border border-[#f59e0b]/20 bg-[#f59e0b]/10 px-2 py-0.5 rounded-full">🌐 Web</span>
+                              )}
+                              <span className="text-[10px] text-zinc-500">{msg.result.processing_time}s</span>
+                            </div>
+
+                            {/* Sources */}
+                            {msg.result.sources && msg.result.sources.length > 0 && (
+                              <div className="flex flex-wrap gap-1.5">
+                                {msg.result.sources.slice(0, 4).map((src, si) => (
+                                  <span key={si} className="text-[10px] text-[#5e6ad2] bg-[#5e6ad2]/10 border border-[#5e6ad2]/20 rounded-md px-2 py-0.5 flex items-center gap-1">
+                                    <BookOpen className="w-2.5 h-2.5" />
+                                    {src.source}{src.page ? ` p.${src.page}` : ""}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+
+                            {/* Feedback row (only for latest assistant message) */}
+                            {idx === chatHistory.length - 1 && (
+                              <div className="flex items-center gap-2">
+                                {feedbackGiven === "positive" ? (
+                                  <span className="text-[11px] text-[#10b981] font-semibold flex items-center gap-1">
+                                    <CheckCircle2 className="w-3.5 h-3.5" /> Indexed!
+                                  </span>
+                                ) : feedbackGiven === "negative" ? (
+                                  <span className="text-[11px] text-zinc-500">Feedback recorded.</span>
+                                ) : (
+                                  <>
+                                    <button onClick={() => handleFeedback(true)} className="flex items-center gap-1 text-[11px] text-zinc-400 hover:text-[#10b981] transition-colors">
+                                      <ThumbsUp className="w-3 h-3" /> Accurate
+                                    </button>
+                                    <span className="text-zinc-600">·</span>
+                                    <button onClick={() => handleFeedback(false)} className="flex items-center gap-1 text-[11px] text-zinc-400 hover:text-[#ef4444] transition-colors">
+                                      <ThumbsDown className="w-3 h-3" /> Poor
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            )}
                           </div>
+                        )}
+                      </div>
+
+                      {/* User avatar */}
+                      {msg.role === "user" && (
+                        <div className="w-8 h-8 rounded-xl bg-[#5e6ad2] flex items-center justify-center shrink-0 mt-1">
+                          <span className="text-[11px] font-bold text-white">U</span>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+
+                  {/* Typing indicator while loading */}
+                  {loading && (
+                    <div className="flex gap-3 justify-start animate-slide-up">
+                      <div className="w-8 h-8 rounded-xl bg-[#5e6ad2]/15 border border-[#5e6ad2]/30 flex items-center justify-center shrink-0">
+                        <span className="text-[11px] font-bold text-[#5e6ad2]">Ω</span>
+                      </div>
+                      <div className="bg-[#131316] border border-[#202024] rounded-2xl rounded-tl-sm px-4 py-3 flex items-center gap-2">
+                        <div className="flex gap-1">
+                          <span className="w-1.5 h-1.5 bg-[#5e6ad2] rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+                          <span className="w-1.5 h-1.5 bg-[#5e6ad2] rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+                          <span className="w-1.5 h-1.5 bg-[#5e6ad2] rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+                        </div>
+                        <span className="text-[11px] text-zinc-400">Running pipeline...</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Clarification inline input */}
+                  {isClarifying && result && (
+                    <div className="flex gap-3 justify-start animate-slide-up">
+                      <div className="w-8 h-8 rounded-xl bg-[#f59e0b]/15 border border-[#f59e0b]/30 flex items-center justify-center shrink-0">
+                        <Info className="w-4 h-4 text-[#f59e0b]" />
+                      </div>
+                      <div className="flex flex-col gap-2 max-w-[80%]">
+                        <div className="bg-[#f59e0b]/10 border border-[#f59e0b]/30 rounded-2xl rounded-tl-sm px-4 py-3">
+                          <p className="text-[11px] text-[#f59e0b] font-semibold mb-1">Clarification needed</p>
+                          <p className="text-xs text-zinc-200">{result.clarification_question}</p>
                         </div>
                         <form onSubmit={handleClarificationSubmit} className="flex gap-2">
                           <input
                             type="text"
                             value={clarificationAnswer}
                             onChange={(e) => setClarificationAnswer(e.target.value)}
-                            placeholder="Respond to narrow down context..."
-                            className="flex-1 bg-[#09090b] border border-[#202024] focus:border-[#f59e0b] focus:outline-none rounded-lg px-3 py-2 text-xs text-white"
+                            placeholder="Your response..."
+                            className="flex-1 bg-[#09090b] border border-[#f59e0b]/30 focus:border-[#f59e0b] focus:outline-none rounded-lg px-3 py-2 text-xs text-white"
                           />
-                          <button
-                            type="submit"
-                            className="bg-[#f59e0b] hover:bg-[#d97706] text-zinc-950 font-medium rounded-lg px-4 py-2 text-xs transition-all"
-                          >
-                            Submit
+                          <button type="submit" className="bg-[#f59e0b] hover:bg-[#d97706] text-zinc-950 font-medium rounded-lg px-3 py-2 text-xs">
+                            Send
                           </button>
                         </form>
                       </div>
-                    )}
-
-                    {/* Main Answer Area */}
-                    {!isClarifying && (
-                      <div className="flex flex-col gap-3">
-                        <h3 className="text-xs font-semibold text-zinc-400">Generated Answer</h3>
-                        <div className="bg-[#0c0c0e] border border-[#202024] rounded-lg p-6 text-zinc-200">
-                          {result.answer ? (
-                            <FormattedAnswer text={result.answer} />
-                          ) : (
-                            <span className="text-xs text-zinc-500 font-mono">No answer generated.</span>
-                          )}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Applied Techniques */}
-                    <div>
-                      <h3 className="text-[10px] uppercase font-bold tracking-widest text-zinc-500 mb-2">Fired Pipelines</h3>
-                      <div className="flex flex-wrap gap-1.5">
-                        {result.techniques_used.map((tech, i) => (
-                          <span key={i} className="text-[10px] bg-[#202024] text-zinc-300 border border-[#2e2e33] rounded px-2 py-0.5">
-                            ⚙️ {tech}
-                          </span>
-                        ))}
-                        {result.web_search_used && (
-                          <span className="text-[10px] bg-[#f59e0b]/10 text-[#f59e0b] border border-[#f59e0b]/20 rounded px-2 py-0.5">
-                            🌐 Web search Fallback
-                          </span>
-                        )}
-                        {result.hallucination_free && (
-                          <span className="text-[10px] bg-[#10b981]/10 text-[#10b981] border border-[#10b981]/20 rounded px-2 py-0.5">
-                            🛡️ Grounded (Hallucination Free)
-                          </span>
-                        )}
-                      </div>
                     </div>
+                  )}
 
-                    {/* Citations / Sources */}
-                    {result.sources && result.sources.length > 0 && (
-                      <div>
-                        <h3 className="text-[10px] uppercase font-bold tracking-widest text-zinc-500 mb-2">Sources Referenced</h3>
-                        <div className="flex flex-col gap-2">
-                          {result.sources.map((src, i) => (
-                            <div key={i} className="bg-[#121214] border border-[#202024] rounded-lg p-3 text-xs">
-                              <div className="flex justify-between items-center mb-1">
-                                <span className="font-semibold text-zinc-300 flex items-center gap-1.5">
-                                  <BookOpen className="w-3.5 h-3.5 text-[#5e6ad2]" />
-                                  {src.source} {src.page ? `p.${src.page}` : ""}
-                                </span>
-                                {src.doc_type && (
-                                  <span className="text-[9px] uppercase tracking-wider text-zinc-500 px-1 py-0.5 rounded bg-[#202024]">
-                                    {src.doc_type}
-                                  </span>
-                                )}
-                              </div>
-                              {src.excerpt && (
-                                <p className="text-[11px] text-zinc-400 font-mono italic">
-                                  "{src.excerpt}"
-                                </p>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
+                  <div ref={chatEndRef} />
+                </div>
 
-                    {/* Dynamic Feedback (Self-Improvement Loop) */}
-                    <div className="border-t border-[#202024] pt-4 flex items-center justify-between">
-                      <span className="text-xs text-zinc-400">Was this answer accurate and well-formatted?</span>
-                      <div className="flex gap-2">
-                        {feedbackGiven === "positive" ? (
-                          <span className="text-xs text-[#10b981] font-semibold flex items-center gap-1.5">
-                            <CheckCircle2 className="w-4 h-4" /> Indexed for Few-Shot Learning!
-                          </span>
-                        ) : feedbackGiven === "negative" ? (
-                          <span className="text-xs text-zinc-400">Feedback recorded.</span>
-                        ) : (
-                          <>
-                            <button
-                              onClick={() => handleFeedback(true)}
-                              className="flex items-center gap-1.5 px-3 py-1.5 border border-[#202024] hover:border-[#10b981] hover:text-[#10b981] rounded-lg text-xs font-medium transition-all"
-                            >
-                              <ThumbsUp className="w-3.5 h-3.5" />
-                              Accurate
-                            </button>
-                            <button
-                              onClick={() => handleFeedback(false)}
-                              className="flex items-center gap-1.5 px-3 py-1.5 border border-[#202024] hover:border-[#ef4444] hover:text-[#ef4444] rounded-lg text-xs font-medium transition-all"
-                            >
-                              <ThumbsDown className="w-3.5 h-3.5" />
-                              Poor
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                )}
+                {/* Sticky bottom input bar */}
+                <div className="border-t border-[#202024] bg-[#0c0c0e] px-6 py-4">
+                  <form onSubmit={(e) => handleQuerySubmit(e)} className="flex gap-2 items-center">
+                    <input
+                      type="text"
+                      value={queryInput}
+                      onChange={(e) => setQueryInput(e.target.value)}
+                      placeholder="Ask a question about your documents..."
+                      disabled={loading}
+                      className="flex-1 bg-[#131316] border border-[#202024] focus:border-[#5e6ad2] focus:outline-none rounded-xl px-4 py-3 text-xs text-white placeholder-zinc-500 transition-all"
+                    />
+                    <button
+                      type="submit"
+                      disabled={loading || !queryInput.trim()}
+                      className="bg-[#5e6ad2] hover:bg-[#707df0] disabled:bg-[#5e6ad2]/30 disabled:cursor-not-allowed text-white font-medium rounded-xl w-10 h-10 flex items-center justify-center transition-all shadow-lg shadow-[#5e6ad2]/20 shrink-0"
+                    >
+                      {loading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+                    </button>
+                  </form>
+                </div>
               </div>
 
-              {/* Right pane: Pipeline Execution Trace */}
-              <div className="w-full xl:w-96 flex flex-col gap-4">
-                <div className="linear-card p-6 flex-1 flex flex-col h-[500px] xl:h-auto overflow-hidden">
+              {/* RIGHT: Pipeline Execution Trace */}
+              <div className="w-full xl:w-[360px] flex flex-col overflow-hidden">
+                <div className="flex-1 flex flex-col overflow-hidden p-6">
                   <h3 className="text-xs font-semibold text-white mb-1">LangGraph Pipeline Trace</h3>
                   <p className="text-[10px] text-zinc-400 mb-4">Observe real-time state flow through nodes</p>
 
-                  <div className="flex-1 overflow-y-auto pr-2 flex flex-col gap-4">
+                  <div className="flex-1 overflow-y-auto pr-1 flex flex-col gap-3">
                     {traceLog.length === 0 && !loading && (
-                      <div className="flex-1 flex flex-col items-center justify-center text-zinc-500 gap-2">
+                      <div className="flex-1 flex flex-col items-center justify-center text-zinc-600 gap-2 py-16">
                         <Activity className="w-8 h-8 opacity-25" />
                         <span className="text-xs">No active execution trace.</span>
                       </div>
@@ -791,15 +764,9 @@ export default function Dashboard() {
                     {traceLog.map((event, idx) => (
                       <div key={idx} className={`border border-[#202024] rounded-lg p-3 text-[11px] animate-slide-up ${getNodeColor(event.node)}`}>
                         <div className="flex justify-between items-center mb-2">
-                          <span className="font-bold text-zinc-300">
-                            {getNodeNameLabel(event.node)}
-                          </span>
-                          <span className="text-[9px] text-zinc-500 font-mono">
-                            {event.elapsed}s
-                          </span>
+                          <span className="font-bold text-zinc-300">{getNodeNameLabel(event.node)}</span>
+                          <span className="text-[9px] text-zinc-500 font-mono">{event.elapsed}s</span>
                         </div>
-
-                        {/* Node details */}
                         <div className="text-zinc-400 font-mono text-[10px] overflow-hidden whitespace-pre-wrap">
                           {event.node === "route_question" && event.update.route && (
                             <p>🗺️ Routed to: <span className="text-white font-bold">{event.update.route}</span></p>
@@ -819,47 +786,41 @@ export default function Dashboard() {
                             <p>📊 CRAG aggregated state: <span className="text-white font-bold">{event.update.crag_state}</span></p>
                           )}
                           {event.node === "detect_contradiction" && (
-                            <p>⚖️ Contradiction check: <span className={event.update.contradiction_found ? "text-[#ef4444]" : "text-[#10b981]"}>{event.update.contradiction_found ? "CONTRADICTION FOUND" : "No conflicts detected."}</span></p>
+                            <p>⚖️ Contradiction: <span className={event.update.contradiction_found ? "text-[#ef4444]" : "text-[#10b981]"}>{event.update.contradiction_found ? "FOUND" : "Clean"}</span></p>
                           )}
                           {event.node === "clarify" && event.update.clarification_question && (
-                            <p>⚠️ Halting to ask: <span className="text-[#f59e0b]">{event.update.clarification_question}</span></p>
+                            <p>⚠️ Asking: <span className="text-[#f59e0b]">{event.update.clarification_question}</span></p>
                           )}
                           {event.node === "query_rewrite" && event.update.question && (
-                            <p>🔄 Query optimized to: <span className="text-white">{event.update.question}</span></p>
+                            <p>🔄 Optimized to: <span className="text-white">{event.update.question}</span></p>
                           )}
-                          {event.node === "web_search" && (
-                            <p>🌐 Web search executed. Added web resources to context documents.</p>
-                          )}
+                          {event.node === "web_search" && (<p>🌐 Web search executed.</p>)}
                           {event.node === "rerank" && event.update.documents && (
-                            <p>⚡ Reranked documents. Top chunk rerank score: <span className="text-white">{(event.update.documents[0]?.metadata?.rerank_score || 0).toFixed(3)}</span></p>
+                            <p>⚡ Top rerank score: <span className="text-white">{(event.update.documents[0]?.metadata?.rerank_score || 0).toFixed(3)}</span></p>
                           )}
-                          {event.node === "few_shot_inject" && (
-                            <p>📦 Dynamic few-shot prompt injected.</p>
-                          )}
+                          {event.node === "few_shot_inject" && (<p>📦 Few-shot injected.</p>)}
                           {event.node === "generate" && event.update.generation && (
-                            <p>✍️ Generated response: <span className="text-zinc-300">"{event.update.generation.slice(0, 70)}..."</span></p>
+                            <p>✍️ "{event.update.generation.slice(0, 60)}..."</p>
                           )}
                           {event.node === "grade_hallucination" && (
-                            <p>🛡️ Grounded check: <span className={event.update.hallucination_free ? "text-[#10b981]" : "text-[#ef4444]"}>{event.update.hallucination_free ? "Fully grounded in documents." : "Hallucination detected."}</span> (Score: {event.update.hallucination_score})</p>
+                            <p>🛡️ <span className={event.update.hallucination_free ? "text-[#10b981]" : "text-[#ef4444]"}>{event.update.hallucination_free ? "Grounded" : "Hallucination!"}</span> (Score: {event.update.hallucination_score})</p>
                           )}
-                          {event.node === "regenerate" && (
-                            <p>🔄 Loop: Re-generating ungrounded claims (Regen #{event.update.regen_count})</p>
-                          )}
+                          {event.node === "regenerate" && (<p>🔄 Re-generating (#{event.update.regen_count})</p>)}
                           {event.node === "confidence_scorer" && (
-                            <p>📏 Computed composite score: <span className="text-white">{event.update.confidence_score}</span> (Low confidence: {event.update.low_confidence ? "YES" : "NO"})</p>
+                            <p>📏 Score: <span className="text-white">{event.update.confidence_score}</span> | Low: {event.update.low_confidence ? "YES" : "NO"}</p>
                           )}
                           {event.node === "grade_answer" && (
-                            <p>🏁 Resolution check: resolves query? <span className="text-white">{event.update.answer_addresses_question ? "YES" : "NO"}</span></p>
+                            <p>🏁 Resolves query: <span className="text-white">{event.update.answer_addresses_question ? "YES" : "NO"}</span></p>
                           )}
                           {event.node === "pipeline_error" && (
-                            <p className="text-[#ef4444]">❌ Error: {event.update.error}</p>
+                            <p className="text-[#ef4444]">❌ {event.update.error}</p>
                           )}
                         </div>
                       </div>
                     ))}
 
                     {streaming && (
-                      <div className="border border-[#5e6ad2] glow-active rounded-lg p-3 text-[11px] animate-pulse flex items-center justify-center gap-2">
+                      <div className="border border-[#5e6ad2] rounded-lg p-3 text-[11px] animate-pulse flex items-center gap-2">
                         <RefreshCw className="w-4 h-4 animate-spin text-[#5e6ad2]" />
                         <span className="text-zinc-300 font-medium">Executing next GraphNode...</span>
                       </div>
