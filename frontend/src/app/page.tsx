@@ -55,6 +55,115 @@ interface TraceEvent {
   update: Record<string, any>;
 }
 
+function FormattedAnswer({ text }: { text: string }) {
+  if (!text) return null;
+
+  const parseInline = (line: string) => {
+    const parts = [];
+    let currentIdx = 0;
+    const regex = /(\*\*|`|\[Doc\s+\d+[^\]]*\]|\[https?:\/\/[^\]]+\])/g;
+    let match;
+    
+    while ((match = regex.exec(line)) !== null) {
+      const matchText = match[0];
+      const matchIdx = match.index;
+      
+      if (matchIdx > currentIdx) {
+        parts.push(line.substring(currentIdx, matchIdx));
+      }
+      
+      if (matchText === '**') {
+        const closingIdx = line.indexOf('**', matchIdx + 2);
+        if (closingIdx !== -1) {
+          parts.push(<strong key={matchIdx} className="font-bold text-white">{line.substring(matchIdx + 2, closingIdx)}</strong>);
+          regex.lastIndex = closingIdx + 2;
+          currentIdx = closingIdx + 2;
+        } else {
+          parts.push(matchText);
+          currentIdx = matchIdx + 2;
+        }
+      } else if (matchText === '`') {
+        const closingIdx = line.indexOf('`', matchIdx + 1);
+        if (closingIdx !== -1) {
+          parts.push(<code key={matchIdx} className="bg-[#18181b] border border-[#27272a] rounded px-1.5 py-0.5 text-[#e2e2e2] font-mono text-[10px]">{line.substring(matchIdx + 1, closingIdx)}</code>);
+          regex.lastIndex = closingIdx + 1;
+          currentIdx = closingIdx + 1;
+        } else {
+          parts.push(matchText);
+          currentIdx = matchIdx + 1;
+        }
+      } else if (matchText.startsWith('[Doc') || matchText.startsWith('[http')) {
+        const cleanCit = matchText.slice(1, -1);
+        parts.push(
+          <span key={matchIdx} className="inline-flex items-center text-[9px] font-semibold text-[#5e6ad2] bg-[#5e6ad2]/10 border border-[#5e6ad2]/20 rounded-md px-1.5 py-0.5 mx-0.5 select-none hover:bg-[#5e6ad2]/20 transition-all cursor-default">
+            {cleanCit}
+          </span>
+        );
+        currentIdx = matchIdx + matchText.length;
+      }
+    }
+    
+    if (currentIdx < line.length) {
+      parts.push(line.substring(currentIdx));
+    }
+    
+    return parts.length > 0 ? parts : line;
+  };
+
+  const lines = text.split('\n');
+  const renderedElements: React.ReactNode[] = [];
+  let listItems: React.ReactNode[] = [];
+
+  const flushList = (key: number) => {
+    if (listItems.length > 0) {
+      renderedElements.push(
+        <ul key={`list-${key}`} className="list-disc pl-5 my-2 space-y-1 text-zinc-300">
+          {listItems}
+        </ul>
+      );
+      listItems = [];
+    }
+  };
+
+  lines.forEach((line, idx) => {
+    const trimmed = line.trim();
+    
+    if (trimmed.startsWith('* ') || trimmed.startsWith('- ')) {
+      const content = trimmed.substring(2);
+      listItems.push(<li key={idx} className="leading-relaxed">{parseInline(content)}</li>);
+    } else if (trimmed.match(/^\d+\.\s/)) {
+      flushList(idx);
+      const match = trimmed.match(/^(\d+)\.\s(.*)/);
+      if (match) {
+        renderedElements.push(
+          <div key={idx} className="flex gap-2 my-1.5 leading-relaxed text-zinc-300">
+            <span className="font-semibold text-[#5e6ad2]">{match[1]}.</span>
+            <span>{parseInline(match[2])}</span>
+          </div>
+        );
+      }
+    } else if (trimmed.startsWith('### ')) {
+      flushList(idx);
+      renderedElements.push(<h4 key={idx} className="text-sm font-semibold text-white mt-4 mb-2">{parseInline(trimmed.substring(4))}</h4>);
+    } else if (trimmed.startsWith('## ')) {
+      flushList(idx);
+      renderedElements.push(<h3 key={idx} className="text-base font-semibold text-white mt-5 mb-2.5">{parseInline(trimmed.substring(3))}</h3>);
+    } else if (trimmed.startsWith('# ')) {
+      flushList(idx);
+      renderedElements.push(<h2 key={idx} className="text-lg font-bold text-white mt-6 mb-3">{parseInline(trimmed.substring(2))}</h2>);
+    } else if (trimmed === '') {
+      flushList(idx);
+    } else {
+      flushList(idx);
+      renderedElements.push(<p key={idx} className="my-2 leading-relaxed text-zinc-300">{parseInline(line)}</p>);
+    }
+  });
+
+  flushList(lines.length);
+
+  return <div className="space-y-1 text-xs">{renderedElements}</div>;
+}
+
 export default function Dashboard() {
   const [activeTab, setActiveTab] = useState<"query" | "documents" | "analytics">("query");
   
@@ -570,8 +679,12 @@ export default function Dashboard() {
                     {!isClarifying && (
                       <div className="flex flex-col gap-3">
                         <h3 className="text-xs font-semibold text-zinc-400">Generated Answer</h3>
-                        <div className="bg-[#0c0c0e] border border-[#202024] rounded-lg p-5 text-xs leading-relaxed text-zinc-200 font-mono whitespace-pre-wrap">
-                          {result.answer || "No answer generated."}
+                        <div className="bg-[#0c0c0e] border border-[#202024] rounded-lg p-6 text-zinc-200">
+                          {result.answer ? (
+                            <FormattedAnswer text={result.answer} />
+                          ) : (
+                            <span className="text-xs text-zinc-500 font-mono">No answer generated.</span>
+                          )}
                         </div>
                       </div>
                     )}
