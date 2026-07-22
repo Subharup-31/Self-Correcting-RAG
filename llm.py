@@ -30,10 +30,7 @@ class FallbackChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
                 if any(k in exc_str for k in ["api_key", "api key", "invalid", "unauthorized", "quota", "blocked", "403", "401", "429"]):
                     logger.warning(f"Primary Gemini API key failed. Retrying with fallback key. Error: {exc}")
                     self.google_api_key = self.fallback_api_key
-                    if hasattr(self, "client"):
-                        delattr(self, "client")
-                    if hasattr(self, "_client"):
-                        self._client = None
+                    self.validate_environment()
                     return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
             raise exc
 
@@ -46,10 +43,7 @@ class FallbackChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
                 if any(k in exc_str for k in ["api_key", "api key", "invalid", "unauthorized", "quota", "blocked", "403", "401", "429"]):
                     logger.warning(f"Primary Gemini API key failed. Retrying with fallback key. Error: {exc}")
                     self.google_api_key = self.fallback_api_key
-                    if hasattr(self, "client"):
-                        delattr(self, "client")
-                    if hasattr(self, "_client"):
-                        self._client = None
+                    self.validate_environment()
                     return await super()._agenerate(messages, stop=stop, run_manager=run_manager, **kwargs)
             raise exc
 
