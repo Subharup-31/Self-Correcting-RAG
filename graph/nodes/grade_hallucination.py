@@ -86,27 +86,38 @@ def get_hallucination_chain():
 
 def grade_hallucination(state: GraphState) -> GraphState:
     """Grade whether the generated answer is grounded in the documents."""
+    import time
+    from config import LLMTimeoutConfig
+    from llm import invoke_chain_safe, record_audit_event
+
+    start_time = time.time()
     documents: List[Document] = state.get("documents", [])
     generation = state.get("generation", "")
-    logger.info(f"---GRADE HALLUCINATION--- ({len(documents)} docs)")
+    logger.info(f"[HallucinationGrader] START ({len(documents)} docs)")
 
     docs_text = "\n\n".join(d.page_content[:1200] for d in documents) or "(no docs)"
     chain = get_hallucination_chain()
 
     try:
-        result: HallucinationGrade = chain.invoke(
-            {"documents": docs_text, "generation": generation}
+        result, was_cached = invoke_chain_safe(
+            chain,
+            {"documents": docs_text, "generation": generation},
+            timeout_seconds=LLMTimeoutConfig.HALLUCINATION_TIMEOUT,
+            node_name="HallucinationGrader"
         )
         grounded = bool(result.grounded)
         score = float(result.confidence_contribution)
         unsupported = list(result.unsupported_claims or [])
     except Exception as exc:  # noqa: BLE001
-        logger.warning(f"Hallucination grader failed: {exc}")
-        grounded, score, unsupported = True, 0.5, []
+        logger.warning(f"[HallucinationGrader] FAILED ({exc}). Fallback: hallucination status unknown (None)")
+        record_audit_event("fallback", f"HallucinationGrader ({exc})")
+        grounded, score, unsupported = None, None, []
 
+    elapsed_ms = int((time.time() - start_time) * 1000)
+    score_str = f"{score:.2f}" if score is not None else "unknown"
     logger.info(
-        f"---HALLUCINATION: grounded={grounded} score={score:.2f} "
-        f"unsupported={len(unsupported)}---"
+        f"[HallucinationGrader] DONE ({elapsed_ms} ms) -> grounded={grounded} score={score_str} "
+        f"unsupported={len(unsupported)}"
     )
     return {
         "hallucination_free": grounded,
@@ -116,11 +127,11 @@ def grade_hallucination(state: GraphState) -> GraphState:
 
 
 def decide_after_hallucination(state: GraphState) -> str:
-    """Conditional edge: regenerate if not grounded (under retry cap)."""
+    """Conditional edge: regenerate only if explicitly hallucination_free is False (under retry cap)."""
     regen_count = state.get("regen_count", 0)
     from config import SelfCorrectionConfig
 
-    if not state.get("hallucination_free", True):
+    if state.get("hallucination_free") is False:
         if regen_count < SelfCorrectionConfig.MAX_RETRY_COUNT:
             return GO_REGENERATE
     return GO_CONFIDENCE

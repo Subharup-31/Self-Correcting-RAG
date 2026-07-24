@@ -21,9 +21,12 @@ CLARIFY = "clarify"
 
 
 class ClarifyingQuestion(BaseModel):
-    """A single clarifying question to ask the user."""
+    """A clarifying question with options to ask the user."""
     question: str = Field(
         description="A concise, specific clarifying question that helps narrow the answer"
+    )
+    options: list[str] = Field(
+        description="2 to 3 very concise, mutually exclusive options representing potential user intents based on the documents, to help the user choose quickly"
     )
 
 
@@ -31,21 +34,24 @@ CLARIFY_SYSTEM = """The user asked a question, but the available documents are \
 ambiguous or only partially relevant. Rather than guess, generate ONE short, \
 specific clarifying question that would help disambiguate what the user wants.
 
+Additionally, provide 2 to 3 very concise, mutually exclusive options representing the potential intents (extracted from the context) to help them select.
+
 Good clarifying questions:
 - Narrow scope ("Are you asking about X in context Y or Z?")
 - Identify the specific entity/aspect of interest
 - Are answerable in a few words by the user
-- Reference the ambiguity you observed
 
-Do NOT answer the original question. Do NOT apologize. Just ask the clarifying \
-question directly."""
+Good options:
+- Extremely short (3-6 words each)
+- Direct and clear
+- Mutually exclusive"""
 
 CLARIFY_HUMAN = """Original question: {question}
 
 Ambiguous retrieved context (snippet):
 {context}
 
-Generate one clarifying question:"""
+Generate one clarifying question and options:"""
 
 
 def build_clarify_chain():
@@ -78,20 +84,23 @@ def clarify(state: GraphState) -> GraphState:
             {"question": question, "context": context}
         )
         clarifying_q = result.question.strip()
+        options = [opt.strip() for opt in result.options if opt.strip()]
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"Clarify chain failed: {exc}")
         clarifying_q = (
             "Could you clarify what specific aspect you're asking about? "
             "The available documents cover several related topics."
         )
+        options = ["General summary", "Technical details"]
 
     techniques = list(state.get("techniques_used", []))
     if "Clarifying Question" not in techniques:
         techniques.append("Clarifying Question")
 
-    logger.info(f"---CLARIFY QUESTION: {clarifying_q}---")
+    logger.info(f"---CLARIFY QUESTION: {clarifying_q} (Options: {options})---")
     return {
         "clarification_needed": True,
         "clarification_question": clarifying_q,
+        "clarification_options": options,
         "techniques_used": techniques,
     }

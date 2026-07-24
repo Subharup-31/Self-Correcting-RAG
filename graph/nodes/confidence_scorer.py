@@ -33,7 +33,13 @@ def compute_confidence(state: GraphState) -> tuple[float, str]:
     """Return (confidence_score, reason_if_low)."""
     cfg = SelfCorrectionConfig
 
-    hallucination_score = float(state.get("hallucination_score", 0.5))
+    if state.get("generation_failed", False):
+        return 0.0, "Answer generation failed"
+
+    raw_h = state.get("hallucination_score")
+    is_h_unavailable = raw_h is None
+    hallucination_score = float(raw_h) if raw_h is not None else 0.5
+
     crag_state = state.get("crag_state", "ambiguous") or "ambiguous"
     crag_score = cfg.CRAG_STATE_SCORES.get(crag_state, 0.5)
     answer_addresses = 1.0 if state.get("answer_addresses_question", False) else 0.0
@@ -48,12 +54,15 @@ def compute_confidence(state: GraphState) -> tuple[float, str]:
     )
     score = max(0.0, min(1.0, score))
 
-    # Build a reason if low.
+    # Build a reason if low or if hallucination check was unavailable.
     reason = ""
+    parts = []
+    if is_h_unavailable:
+        parts.append("Hallucination grading unavailable")
+    elif hallucination_score < 0.5:
+        parts.append(f"answer weakly grounded in sources ({hallucination_score:.2f})")
+
     if score < cfg.CONFIDENCE_THRESHOLD:
-        parts = []
-        if hallucination_score < 0.5:
-            parts.append(f"answer weakly grounded in sources ({hallucination_score:.2f})")
         if crag_state == "ambiguous":
             parts.append("retrieved context was ambiguous")
         elif crag_state == "incorrect":
@@ -63,6 +72,9 @@ def compute_confidence(state: GraphState) -> tuple[float, str]:
         if retry_count > 0:
             parts.append(f"required {retry_count} retrieval retries")
         reason = "; ".join(parts) or "overall quality signals below threshold"
+    elif is_h_unavailable:
+        reason = "Hallucination grading unavailable"
+
     return score, reason
 
 

@@ -49,10 +49,10 @@ from langchain_core.documents import Document
 from langgraph.graph import END, START, StateGraph
 from loguru import logger
 
-from config import SelfCorrectionConfig
+from config import SelfCorrectionConfig, APIKeys
 from graph.state import GraphState, initial_state
 from graph.chains.few_shot_learner import get_few_shot_learner
-from graph.chains.query_decomposer import decompose_query, is_complex_query
+from graph.chains.query_decomposer import decompose_query, is_complex_query, multi_query_expansion
 
 # Node functions
 from graph.nodes.route import (
@@ -118,6 +118,27 @@ def get_hyde_retriever() -> HyDERetriever:
 
 
 # ============================================================
+# Comparison query detection (for parallel web augmentation)
+# ============================================================
+_COMPARISON_TRIGGERS = (
+    " vs ", " versus ", " compare ", " comparison ",
+    " different from ", " differ from ", " unlike ",
+    " compared to ", " relative to ", " better than ",
+    " worse than ", " how does ", " what is the difference ",
+)
+
+
+def _is_comparison_query(question: str) -> bool:
+    """Return True if the query asks to compare internal docs with external knowledge.
+
+    Used to trigger parallel web augmentation alongside vector-store retrieval,
+    so the LLM can synthesise differences across both sources in one shot.
+    """
+    q = f" {question.lower()} "
+    return any(trigger in q for trigger in _COMPARISON_TRIGGERS)
+
+
+# ============================================================
 # Node wrappers (bind the shared retriever + handle edge cases)
 # ============================================================
 def _node_decompose(state: GraphState) -> GraphState:
@@ -133,7 +154,86 @@ def _node_decompose(state: GraphState) -> GraphState:
 
 
 def _node_retrieve(state: GraphState) -> GraphState:
-    return retrieve(state, get_hybrid_retriever(), get_hyde_retriever(), use_hyde=True)
+    """Retrieve from the vector store, then optionally augment with web results
+    when the query is asking to *compare* internal documents with external sources
+    (e.g. "How does our leave policy differ from Google's?").
+
+    Sub-question retrieval is already handled inside retrieve() itself.
+    Multi-query expansion runs here in parallel for broader recall.
+    """
+    question = state["question"]
+    use_hyde = is_complex_query(question)
+
+    # ── Primary retrieval (vector store, BM25, HyDE, sub-questions) ──────────
+    base_result = retrieve(state, get_hybrid_retriever(), get_hyde_retriever(), use_hyde=use_hyde)
+    all_docs = list(base_result.get("documents", []))
+    techniques = list(base_result.get("techniques_used", state.get("techniques_used", [])))
+    seen_keys = {d.page_content[:200] for d in all_docs}
+    owner_id = state.get("owner_id", "default_owner")
+    session_id = state.get("session_id", "")
+
+    # ── Multi-query expansion: 3 rephrased variations searched in parallel ──────
+    # Runs for every query (not just complex) to improve recall diversity.
+    # Wrapped in try/except so any LLM timeout doesn't block the main retrieval.
+    try:
+        variations = multi_query_expansion(question)
+        if variations:
+            import concurrent.futures
+
+            def _fetch_variation(v: str):
+                try:
+                    return get_hybrid_retriever().retrieve(v, top_k=3,
+                                                          owner_id=owner_id,
+                                                          session_id=session_id)
+                except Exception:
+                    return []
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+                var_results = list(ex.map(_fetch_variation, variations))
+
+            added_var = 0
+            for docs in var_results:
+                for doc in docs:
+                    key = doc.page_content[:200]
+                    if key not in seen_keys:
+                        all_docs.append(doc)
+                        seen_keys.add(key)
+                        added_var += 1
+
+            if added_var:
+                logger.info(f"[Retrieve] Multi-query expansion added {added_var} unique doc(s).")
+                if "Multi-Query Expansion" not in techniques:
+                    techniques.append("Multi-Query Expansion")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[Retrieve] Multi-query expansion failed (non-fatal): {exc}")
+
+    # ── Comparison-query web augmentation ────────────────────────────────────
+    # Only fires when:
+    #   - the router chose vectorstore (we're in this node at all)
+    #   - the query is a comparison ("X vs Y", "how does A differ from B")
+    #   - Tavily key is configured
+    if _is_comparison_query(question) and APIKeys.TAVILY_API_KEY:
+        logger.info("[Retrieve] Comparison query detected — augmenting with web search.")
+        try:
+            web_result = web_search(state)
+            web_docs = web_result.get("documents", [])
+            added = 0
+            for doc in web_docs:
+                key = doc.page_content[:200]
+                if key not in seen_keys:
+                    # Tag web docs so the LLM prompt and source list distinguish them
+                    doc.metadata.setdefault("retrieval_method", "web_comparison")
+                    all_docs.append(doc)
+                    seen_keys.add(key)
+                    added += 1
+            if added:
+                logger.info(f"[Retrieve] Added {added} web doc(s) for comparison context.")
+                if "Web Comparison Augmentation" not in techniques:
+                    techniques.append("Web Comparison Augmentation")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[Retrieve] Comparison web augmentation failed (non-fatal): {exc}")
+
+    return {"documents": all_docs, "techniques_used": techniques}
 
 
 def _node_web_search(state: GraphState) -> GraphState:
@@ -145,7 +245,8 @@ def _node_query_rewrite(state: GraphState) -> GraphState:
     new_state = rewrite_query(state)
     # Merge and re-retrieve with the rewritten query.
     merged = {**state, **new_state}
-    retrieved = retrieve(merged, get_hybrid_retriever(), get_hyde_retriever(), use_hyde=True)
+    # Bypass HyDE for rewritten queries (they are already optimized search queries)
+    retrieved = retrieve(merged, get_hybrid_retriever(), get_hyde_retriever(), use_hyde=False)
     # Merge new docs into existing.
     existing_docs = list(state.get("documents", []))
     new_docs = retrieved.get("documents", [])
@@ -163,67 +264,99 @@ def _node_query_rewrite(state: GraphState) -> GraphState:
 
 
 def _node_few_shot_inject(state: GraphState) -> GraphState:
-    """Pull similar past examples and stash the few-shot prefix in state.
-
-    We store it as a transient key via a module-global so the generate node can
-    read it without bloating GraphState's schema.
-    """
-    global _pending_few_shot_prefix
+    """Pull similar past examples and stash the few-shot prefix in state (thread-safe)."""
     try:
         prefix = get_few_shot_learner().get_dynamic_prompt(state["question"])
     except Exception:
         prefix = ""
-    _pending_few_shot_prefix = prefix
     techniques = list(state.get("techniques_used", []))
     if prefix and "Dynamic Few-Shot" not in techniques:
         techniques.append("Dynamic Few-Shot")
-    return {"techniques_used": techniques}
-
-
-_pending_few_shot_prefix = ""
+    return {"few_shot_prefix": prefix, "techniques_used": techniques}
 
 
 def _node_generate(state: GraphState) -> GraphState:
-    global _pending_few_shot_prefix
-    result = generate(state, few_shot_prefix=_pending_few_shot_prefix)
-    _pending_few_shot_prefix = ""  # reset
-    return result
+    prefix = state.get("few_shot_prefix", "")
+    return generate(state, few_shot_prefix=prefix)
 
 
 def _node_regenerate(state: GraphState) -> GraphState:
     """Re-generate after hallucination failure. Bumps regen_count."""
     regen_count = state.get("regen_count", 0) + 1
     logger.info(f"---REGENERATE #{regen_count}---")
-    # Force the generation to be more conservative by adding an instruction.
+    prefix = state.get("few_shot_prefix", "")
     new_state = {**state, "regen_count": regen_count}
-    gen = generate(new_state, few_shot_prefix=_pending_few_shot_prefix)
+    gen = generate(new_state, few_shot_prefix=prefix)
     gen["regen_count"] = regen_count
     return gen
 
 
 def _node_direct_llm(state: GraphState) -> GraphState:
-    """Generate an answer with no retrieval (greetings, math, chit-chat)."""
-    logger.info("---DIRECT LLM (no retrieval)---")
-    # Provide empty context; the generation prompt will handle it.
-    empty_state = {**state, "documents": []}
-    return generate(empty_state)
+    """Tag the route and pass through — GENERATE node handles actual generation.
+
+    Previously this called generate() internally, which caused a double-generation:
+    _node_direct_llm ran generate() AND then GENERATE node ran it again, wasting
+    one full LLM call on every conversational/greeting/math query.
+
+    Now: just ensure documents is empty so GENERATE skips retrieval context.
+    The _after_generate conditional edge already routes direct_llm → finalize,
+    bypassing hallucination grading correctly.
+    """
+    logger.info("---DIRECT LLM (no retrieval) — handing off to GENERATE node---")
+    return {"documents": [], "route": "direct_llm"}
 
 
 def _node_end_with_sources(state: GraphState) -> GraphState:
     """Terminal node: build the sources list from documents."""
-    sources = []
-    seen = set()
+    if state.get("clarification_needed", False):
+        return {"sources": []}
+
+    import re
+    sources_dict = {}
     for d in state.get("documents", []):
-        key = (d.metadata.get("source", ""), d.metadata.get("page_number", ""))
-        if key in seen:
-            continue
-        seen.add(key)
+        raw_source = d.metadata.get("source", "unknown")
+        # Clean the uuid hash prefix (e.g., c1d5e99e_filename.pdf -> filename.pdf)
+        clean_source = re.sub(r'^[a-fA-F0-9]{8}_', '', raw_source)
+        
+        page = d.metadata.get("page_number")
+        if page in (None, "", "?", "unknown"):
+            page_val = None
+        else:
+            try:
+                page_val = int(page)
+            except ValueError:
+                page_val = str(page).strip()
+                
+        doc_type = d.metadata.get("doc_type", "")
+        excerpt = d.page_content[:150].replace("\n", " ") + "..."
+        
+        if clean_source not in sources_dict:
+            sources_dict[clean_source] = {
+                "pages": set(),
+                "doc_type": doc_type,
+                "excerpts": []
+            }
+        
+        if page_val is not None:
+            sources_dict[clean_source]["pages"].add(page_val)
+        if excerpt:
+            sources_dict[clean_source]["excerpts"].append(excerpt)
+
+    sources = []
+    for clean_source, info in sources_dict.items():
+        # Sort pages: ints first, then strings
+        pages_list = sorted(list(info["pages"]), key=lambda x: (isinstance(x, str), x))
+        pages_str = ", ".join(map(str, pages_list)) if pages_list else None
+        
+        combined_excerpt = " | ".join(info["excerpts"][:3])
+        
         sources.append({
-            "source": d.metadata.get("source", "unknown"),
-            "page": d.metadata.get("page_number", "?"),
-            "doc_type": d.metadata.get("doc_type", ""),
-            "excerpt": d.page_content[:150].replace("\n", " ") + "...",
+            "source": clean_source,
+            "page": pages_str,
+            "doc_type": info["doc_type"],
+            "excerpt": combined_excerpt,
         })
+        
     return {"sources": sources}
 
 
@@ -335,33 +468,45 @@ def build_graph():
         {GRADE_HALLUCINATION: GRADE_HALLUCINATION, "finalize": "finalize"},
     )
 
-    # grade_hallucination → {regenerate | confidence}
+    # grade_hallucination → {regenerate | grade_answer}
     workflow.add_conditional_edges(
         GRADE_HALLUCINATION,
         decide_after_hallucination,
-        {GO_REGENERATE: REGENERATE, GO_CONFIDENCE: CONFIDENCE_SCORER},
+        {GO_REGENERATE: REGENERATE, GO_CONFIDENCE: GRADE_ANSWER},
     )
 
     # regenerate → grade_hallucination (loop)
     workflow.add_edge(REGENERATE, GRADE_HALLUCINATION)
 
-    # confidence_scorer → {end_flagged (finalize) | grade_answer}
-    workflow.add_conditional_edges(
-        CONFIDENCE_SCORER,
-        decide_after_confidence,
-        {"end_flagged": "finalize", "grade_answer": GRADE_ANSWER},
-    )
-
-    # grade_answer → {END | web_search fallback}
+    # grade_answer → confidence_scorer (or web_search if answer doesn't address the question)
+    # This was previously a straight edge, meaning decide_after_answer was never called.
+    # Fixed: now uses the conditional edge so web-search fallback actually fires.
     def _after_answer(state: GraphState) -> str:
-        decision = decide_after_answer(state)
-        if decision == GO_WEB_NOT_USEFUL:
-            return WEBSEARCH
-        return "finalize"
+        from config import SelfCorrectionConfig
+        if not state.get("answer_addresses_question", False):
+            if state.get("retry_count", 0) < SelfCorrectionConfig.MAX_RETRY_COUNT:
+                logger.info("[GradeAnswer] Answer does not address question — routing to web search.")
+                return WEBSEARCH
+        return CONFIDENCE_SCORER
 
     workflow.add_conditional_edges(
         GRADE_ANSWER,
         _after_answer,
+        {WEBSEARCH: WEBSEARCH, CONFIDENCE_SCORER: CONFIDENCE_SCORER},
+    )
+
+    # confidence_scorer → {finalize | web_search}
+    def _after_confidence(state: GraphState) -> str:
+        # If the answer does not address the question and we haven't hit the retry limit, retry retrieval
+        if not state.get("answer_addresses_question", False):
+            if state.get("retry_count", 0) < SelfCorrectionConfig.MAX_RETRY_COUNT:
+                logger.info("Answer does not address the question. Routing to WEBSEARCH for retry.")
+                return WEBSEARCH
+        return "finalize"
+
+    workflow.add_conditional_edges(
+        CONFIDENCE_SCORER,
+        _after_confidence,
         {WEBSEARCH: WEBSEARCH, "finalize": "finalize"},
     )
 
@@ -390,12 +535,21 @@ def get_app():
 # ============================================================
 # Public entry point
 # ============================================================
-def run_query(question: str, config: dict | None = None) -> dict:
+def run_query(
+    question: str,
+    config: dict | None = None,
+    owner_id: str = "default_owner",
+    session_id: str = ""
+) -> dict:
     """Run a single question through the full pipeline. Returns the final state."""
+    from llm import get_request_audit, start_request_context
+
     start = time.time()
-    state = initial_state(question)
+    start_request_context()
+
+    state = initial_state(question, owner_id=owner_id, session_id=session_id)
     app = get_app()
-    logger.info(f"=== RUN QUERY: {question} ===")
+    logger.info(f"=== RUN QUERY: {question} owner={owner_id} session={session_id} ===")
     try:
         final_state = app.invoke(state, config=config)
     except Exception as exc:  # noqa: BLE001
@@ -404,15 +558,65 @@ def run_query(question: str, config: dict | None = None) -> dict:
 
     elapsed = time.time() - start
     final_state["processing_time"] = round(elapsed, 3)
+
+    audit = get_request_audit()
+    final_state["llm_calls"] = audit.get("llm_calls", 0)
+    final_state["skipped_nodes"] = audit.get("skipped_nodes", [])
+    final_state["fallback_nodes"] = audit.get("fallbacks", [])
+    telemetry = audit.get("telemetry", [])
+    final_state["node_telemetry"] = telemetry
+
+    skipped_str = ", ".join(final_state["skipped_nodes"]) if final_state["skipped_nodes"] else "None"
+    fallbacks_str = ", ".join(final_state["fallback_nodes"]) if final_state["fallback_nodes"] else "None"
+
+    # Pipeline Trace formatting
+    trace_lines = []
+    slowest_node = "N/A"
+    slowest_dur = -1
+    total_llm_dur_ms = 0
+
+    for item in telemetry:
+        node_name = item.get("node", "Unknown")
+        dur = item.get("duration_ms", 0)
+        provider = item.get("provider", "local")
+        cached = " (CACHE HIT)" if item.get("cached") else ""
+        timeout_flag = " (TIMEOUT)" if item.get("timeout") else ""
+        fallback_flag = " (FALLBACK)" if item.get("fallback") else ""
+
+        if dur > slowest_dur:
+            slowest_dur = dur
+            slowest_node = f"{node_name} ({dur / 1000.0:.2f} s)"
+
+        total_llm_dur_ms += dur
+        trace_lines.append(f"  {node_name:<22} {dur:>6} ms  [{provider}]{cached}{timeout_flag}{fallback_flag}")
+
+    avg_llm_latency_s = (total_llm_dur_ms / len(telemetry) / 1000.0) if telemetry else 0.0
+    trace_block = "\n".join(trace_lines) if trace_lines else "  (No LLM calls invoked)"
+
     logger.info(
-        f"=== QUERY DONE in {elapsed:.2f}s | "
-        f"confidence={final_state.get('confidence_score', 0):.2f} "
-        f"techniques={final_state.get('techniques_used', [])} ==="
+        f"\n------------------------------------------------------------------------\n"
+        f"Pipeline Trace\n"
+        f"{trace_block}\n"
+        f"------------------------------------------------------------------------\n"
+        f"Execution Summary\n"
+        f"Total Graph Time:    {elapsed:.2f} s\n"
+        f"Total LLM Calls:     {final_state['llm_calls']}\n"
+        f"Average LLM Latency: {avg_llm_latency_s:.2f} s\n"
+        f"Slowest Node:        {slowest_node}\n"
+        f"Skipped Nodes:       {skipped_str}\n"
+        f"Fallbacks:           {fallbacks_str}\n"
+        f"Confidence:          {final_state.get('confidence_score', 0):.2f}\n"
+        f"------------------------------------------------------------------------"
     )
     return final_state
 
 
-def stream_query(question: str, config: dict | None = None):
+def stream_query(
+    question: str,
+    config: dict | None = None,
+    owner_id: str = "default_owner",
+    session_id: str = ""
+):
     """Stream intermediate states (for the SSE pipeline-trace endpoint).
     
     The final __done__ event now contains the complete final_state so the
@@ -420,7 +624,7 @@ def stream_query(question: str, config: dict | None = None):
     """
     import time as _time
     start = _time.time()
-    state = initial_state(question)
+    state = initial_state(question, owner_id=owner_id, session_id=session_id)
     app = get_app()
     final_state = state  # will be overwritten by the last node update
     all_updates: dict = {}

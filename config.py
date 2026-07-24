@@ -13,18 +13,6 @@ from dotenv import load_dotenv
 # Load .env from project root (idempotent)
 load_dotenv()
 
-# Only apply custom socket monkeypatch if explicitly enabled via environment variable
-if os.getenv("ENABLE_SOCKET_MONKEYPATCH", "false").lower() == "true":
-    import socket
-    _orig_getaddrinfo = socket.getaddrinfo
-
-    def _custom_getaddrinfo(host, port, *args, **kwargs):
-        if host == "197cde2c-b60c-4e50-8623-54c2f729cddb.eu-west-1-0.aws.cloud.qdrant.io":
-            return _orig_getaddrinfo("54.78.151.125", port, *args, **kwargs)
-        return _orig_getaddrinfo(host, port, *args, **kwargs)
-
-    socket.getaddrinfo = _custom_getaddrinfo
-
 # ============================================================
 # Paths
 # ============================================================
@@ -218,11 +206,26 @@ class ServerConfig:
     CORS_ORIGINS = ["*"]
 
 
+# ============================================================
+# LLM Timeouts (per-node)
+# ============================================================
+class LLMTimeoutConfig:
+    ROUTER_TIMEOUT = float(os.getenv("TIMEOUT_ROUTER", "8.0"))
+    HYDE_TIMEOUT = float(os.getenv("TIMEOUT_HYDE", "12.0"))
+    DOC_GRADER_TIMEOUT = float(os.getenv("TIMEOUT_DOC_GRADER", "12.0"))
+    GENERATION_TIMEOUT = float(os.getenv("TIMEOUT_GENERATION", "45.0"))
+    HALLUCINATION_TIMEOUT = float(os.getenv("TIMEOUT_HALLUCINATION", "12.0"))
+    CONTRADICTION_TIMEOUT = float(os.getenv("TIMEOUT_CONTRADICTION", "12.0"))
+    ANSWER_GRADER_TIMEOUT = float(os.getenv("TIMEOUT_ANSWER_GRADER", "10.0"))
+    DECOMPOSER_TIMEOUT = float(os.getenv("TIMEOUT_DECOMPOSER", "8.0"))
+    REWRITE_TIMEOUT = float(os.getenv("TIMEOUT_REWRITE", "8.0"))
+
+
 __all__ = [
     "BASE_DIR", "DOCUMENTS_DIR", "CHROMA_PERSIST_DIR",
     "FEW_SHOT_STORE", "EVALUATION_RESULTS",
     "LLMConfig", "ModelConfig", "RetrievalConfig",
-    "SelfCorrectionConfig", "APIKeys", "ServerConfig",
+    "SelfCorrectionConfig", "LLMTimeoutConfig", "APIKeys", "ServerConfig",
     "QdrantConfig",
 ]
 

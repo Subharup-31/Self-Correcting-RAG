@@ -76,13 +76,26 @@ def get_contradiction_chain():
 
 def detect_contradiction(state: GraphState) -> GraphState:
     """Check the top-3 retrieved documents pairwise for contradictions."""
+    import time
+    from config import LLMTimeoutConfig
+    from llm import invoke_chain_safe, record_audit_event
+
+    start_time = time.time()
     question = state["question"]
     documents: List[Document] = state.get("documents", [])
     chain = get_contradiction_chain()
 
-    # Only check top few to bound cost.
     candidates = documents[:3]
-    logger.info(f"---DETECT CONTRADICTION--- checking {len(candidates)} doc(s)")
+    if len(candidates) < 2:
+        logger.info(f"[ContradictionDetection] SKIPPED (fewer than 2 docs: {len(candidates)})")
+        record_audit_event("skip", "Contradiction Detection")
+        return {
+            "contradiction_found": False,
+            "contradiction_detail": "",
+            "techniques_used": state.get("techniques_used", []),
+        }
+
+    logger.info(f"[ContradictionDetection] START (checking {len(candidates)} docs)")
 
     contradiction_found = False
     detail = ""
@@ -91,20 +104,29 @@ def detect_contradiction(state: GraphState) -> GraphState:
             break
         for j in range(i + 1, len(candidates)):
             try:
-                result: ContradictionCheck = chain.invoke({
-                    "question": question,
-                    "doc_a": candidates[i].page_content[:1000],
-                    "doc_b": candidates[j].page_content[:1000],
-                })
+                result, was_cached = invoke_chain_safe(
+                    chain,
+                    {
+                        "question": question,
+                        "doc_a": candidates[i].page_content[:1000],
+                        "doc_b": candidates[j].page_content[:1000],
+                    },
+                    timeout_seconds=LLMTimeoutConfig.CONTRADICTION_TIMEOUT,
+                    node_name="ContradictionDetection"
+                )
                 if result.has_contradiction:
                     contradiction_found = True
                     src_i = candidates[i].metadata.get("source", f"Doc {i+1}")
                     src_j = candidates[j].metadata.get("source", f"Doc {j+1}")
                     detail = f"[{src_i}] vs [{src_j}]: {result.detail}"
-                    logger.warning(f"---CONTRADICTION FOUND: {detail}---")
+                    logger.warning(f"[ContradictionDetection] CONTRADICTION FOUND: {detail}")
                     break
             except Exception as exc:  # noqa: BLE001
-                logger.warning(f"Contradiction check failed for pair ({i},{j}): {exc}")
+                logger.warning(f"[ContradictionDetection] FAILED for pair ({i},{j}) ({exc}). Fallback: continue")
+                record_audit_event("fallback", f"ContradictionDetection ({exc})")
+
+    elapsed_ms = int((time.time() - start_time) * 1000)
+    logger.info(f"[ContradictionDetection] DONE ({elapsed_ms} ms) -> contradiction={contradiction_found}")
 
     techniques = list(state.get("techniques_used", []))
     if contradiction_found and "Contradiction Detection" not in techniques:

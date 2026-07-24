@@ -65,14 +65,30 @@ class HybridRetriever:
         self.bm25 = bm25
         self.k = k
 
-    def retrieve(self, query: str, top_k: int = RetrievalConfig.HYBRID_FINAL_K) -> List[Document]:
-        """Run both retrievers and fuse their results."""
+    def retrieve(
+        self,
+        query: str,
+        top_k: int = RetrievalConfig.HYBRID_FINAL_K,
+        owner_id: str = "default_owner",
+        session_id: str = "",
+        vector_query: str | None = None,
+        bm25_query: str | None = None,
+    ) -> List[Document]:
+        """Run both retrievers and fuse their results, scoped to owner and/or session documents."""
         if not query.strip():
             return []
 
+        vec_q = (vector_query or query).strip()
+        bm25_q = (bm25_query or query).strip()
+
         # Vector (semantic) retrieval.
         try:
-            vector_results = self.vector_store.search(query, k=RetrievalConfig.VECTOR_TOP_K)
+            vector_results = self.vector_store.search(
+                vec_q,
+                k=RetrievalConfig.VECTOR_TOP_K,
+                owner_id=owner_id,
+                session_id=session_id
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"Vector search failed: {exc}")
             vector_results = []
@@ -80,7 +96,12 @@ class HybridRetriever:
             d.metadata.setdefault("retrieval_method", "vector")
 
         # BM25 (lexical) retrieval.
-        bm25_results = self.bm25.search(query, k=RetrievalConfig.BM25_TOP_K)
+        bm25_results = self.bm25.search(
+            bm25_q,
+            k=RetrievalConfig.BM25_TOP_K,
+            owner_id=owner_id,
+            session_id=session_id
+        )
 
         # Fuse.
         ranked_lists = []

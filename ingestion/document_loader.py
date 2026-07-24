@@ -135,7 +135,7 @@ class DocumentLoader:
         """
         try:
             import pytesseract
-            from PIL import Image
+            from PIL import Image, ImageEnhance
             import io
         except ImportError:  # pragma: no cover
             logger.warning("pytesseract/PIL not installed; OCR unavailable.")
@@ -145,6 +145,33 @@ class DocumentLoader:
             # Render page at 300 DPI for decent OCR accuracy.
             pix = page.get_pixmap(dpi=300)
             img = Image.open(io.BytesIO(pix.tobytes("png")))
+            
+            # Detect rotation and auto-rotate scan if needed
+            try:
+                osd = pytesseract.image_to_osd(img)
+                rotation = 0
+                if "Rotate:" in osd:
+                    match = re.search(r"Rotate:\s*(\d+)", osd)
+                    if match:
+                        rotation = int(match.group(1))
+                elif "Orientation in degrees:" in osd:
+                    match = re.search(r"Orientation in degrees:\s*(\d+)", osd)
+                    if match:
+                        rotation = int(match.group(1))
+                if rotation in (90, 180, 270):
+                    img = img.rotate(-rotation, expand=True)
+                    logger.info(f"Auto-rotated page scan by {-rotation} degrees based on OSD.")
+            except Exception as exc:
+                logger.debug(f"Tesseract OSD skipped/failed: {exc}")
+
+            # Preprocess image: convert to grayscale and double the contrast
+            try:
+                img = img.convert("L")
+                enhancer = ImageEnhance.Contrast(img)
+                img = enhancer.enhance(2.0)
+            except Exception as exc:
+                logger.warning(f"Image preprocessing failed: {exc}")
+
             data = pytesseract.image_to_data(
                 img, output_type=pytesseract.Output.DICT
             )
@@ -178,14 +205,46 @@ class DocumentLoader:
     def _load_image(self, path: Path) -> List[Document]:
         try:
             import pytesseract
-            from PIL import Image
+            from PIL import Image, ImageEnhance
         except ImportError as exc:  # pragma: no cover
             raise ImportError(
                 "pytesseract + Pillow required for image OCR."
             ) from exc
 
-        img = Image.open(path)
-        data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+        try:
+            img = Image.open(path)
+            
+            # Detect rotation and auto-rotate scan if needed
+            try:
+                osd = pytesseract.image_to_osd(img)
+                rotation = 0
+                if "Rotate:" in osd:
+                    match = re.search(r"Rotate:\s*(\d+)", osd)
+                    if match:
+                        rotation = int(match.group(1))
+                elif "Orientation in degrees:" in osd:
+                    match = re.search(r"Orientation in degrees:\s*(\d+)", osd)
+                    if match:
+                        rotation = int(match.group(1))
+                if rotation in (90, 180, 270):
+                    img = img.rotate(-rotation, expand=True)
+                    logger.info(f"Auto-rotated image {path.name} by {-rotation} degrees based on OSD.")
+            except Exception as exc:
+                logger.debug(f"Tesseract OSD skipped/failed: {exc}")
+
+            # Preprocess image: convert to grayscale and double the contrast
+            try:
+                img = img.convert("L")
+                enhancer = ImageEnhance.Contrast(img)
+                img = enhancer.enhance(2.0)
+            except Exception as exc:
+                logger.warning(f"Image preprocessing failed: {exc}")
+
+            data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+        except Exception as exc:
+            logger.error(f"Failed to open/OCR image {path.name}: {exc}")
+            return []
+
         words, confs = [], []
         for i, w in enumerate(data.get("text", [])):
             w = (w or "").strip()

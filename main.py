@@ -84,8 +84,17 @@ def cmd_query(args):
 
 def cmd_evaluate(args):
     """Run the full evaluation harness."""
-    from evaluation.harness import run_evaluation
-    result = run_evaluation()
+    if args.extended:
+        from evaluation.evaluator import EvaluationRunner
+        runner = EvaluationRunner()
+        result = runner.run_benchmark()
+        print("\n=== EXTENDED EVALUATION SUMMARY ===")
+        for k, v in result["summary"].items():
+            print(f"  {k}: {v}")
+        print("\nDetailed results saved to SQLite database evaluation_runs.db.")
+    else:
+        from evaluation.harness import run_evaluation
+        result = run_evaluation()
 
 
 def cmd_demo(args):
@@ -175,6 +184,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_query.set_defaults(func=cmd_query)
 
     p_eval = sub.add_parser("evaluate", help="Run the evaluation harness")
+    p_eval.add_argument("--extended", action="store_true", help="Run the extended precision/recall/faithfulness evaluation")
     p_eval.set_defaults(func=cmd_evaluate)
 
     p_demo = sub.add_parser("demo", help="Generate sample docs, ingest, run demos")

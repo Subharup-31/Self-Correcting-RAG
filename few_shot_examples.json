@@ -1,0 +1,16 @@
+[
+  {
+    "query": "mention all the main key fetaures of it and how does it imporve,,,tel me in detaield",
+    "answer": "Retrieval-Augmented Generation (RAG) integrates retrieval models with large language models (LLMs) to enhance text generation by incorporating external knowledge [Doc 2, p. 2; Doc 4, p. 1]. Its key features and improvements include:\n\n**Key Features:**\n*   **External Data Integration:** RAG utilizes external databases to search for and extract relevant documents, which serve as supplementary references or instructions for queries [Doc 2, p. 2].\n*   **Retrieval-Generation Process:** The process generally involves two steps: first, a retriever searches the external database; second, the retrieved documents are combined with the original query to provide context for the generator [Doc 2, p. 2].\n*   **Integration Designs:** Augmentation can occur at the input, output, or intermediate layers of the generator [Doc 3, p. 4]. For example, \"input-layer integration\" combines retrieved documents with the original query as a single sequence for the model [Doc 3, p. 4].\n\n**How it Improves LLMs:**\n*   **Overcoming Knowledge Limitations:** LLMs may lack the latest information or specific domain knowledge not present in their training data. RAG allows models to access a vast, up-to-date knowledge base, enabling them to answer queries that are out-of-scope for the pre-trained model [Doc 1, p. 7; Doc 2, p. 2].\n*   **Enhanced Generation Quality:** By providing contextually relevant information, RAG improves the coherence and quality of generated text [Doc 1, p. 7; Doc 2, p. 2].\n*   **Scalability:** Techniques such as FiD (Fusion-in-Decoder) allow for processing a large number of retrieved documents by handling them independently in the encoder, which helps overcome constraints related to input length [Doc 3, p. 4].",
+    "feedback_score": 1.0,
+    "timestamp": "2026-07-24T08:37:15.337344+00:00",
+    "example_id": "881400cb-789e-4396-b0d1-ac0081aa1214"
+  },
+  {
+    "query": "what",
+    "answer": "The provided documents do not contain enough information to fully answer this.",
+    "feedback_score": 1.0,
+    "timestamp": "2026-07-24T15:29:52.942403+00:00",
+    "example_id": "5600b5d2-9e33-407f-a74d-8f0da4548d61"
+  }
+]

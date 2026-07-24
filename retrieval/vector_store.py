@@ -50,8 +50,8 @@ def get_embeddings():
         logger.info(f"Loading NVIDIA embeddings: {ModelConfig.EMBEDDING_MODEL}")
         return OpenAIEmbeddings(
             model=ModelConfig.EMBEDDING_MODEL,
-            openai_api_key=APIKeys.NVIDIA_API_KEY or os.getenv("NVIDIA_API_KEY"),
-            openai_api_base="https://integrate.api.nvidia.com/v1",
+            api_key=APIKeys.NVIDIA_API_KEY or os.getenv("NVIDIA_API_KEY"),
+            base_url="https://integrate.api.nvidia.com/v1",
         )
         
     elif provider == "openrouter":
@@ -61,8 +61,8 @@ def get_embeddings():
         logger.info(f"Loading OpenRouter embeddings: {ModelConfig.EMBEDDING_MODEL}")
         return OpenAIEmbeddings(
             model=ModelConfig.EMBEDDING_MODEL,
-            openai_api_key=APIKeys.OPENROUTER_API_KEY or os.getenv("OPENROUTER_API_KEY"),
-            openai_api_base="https://openrouter.ai/api/v1",
+            api_key=APIKeys.OPENROUTER_API_KEY or os.getenv("OPENROUTER_API_KEY"),
+            base_url="https://openrouter.ai/api/v1",
         )
         
     else:
@@ -91,6 +91,29 @@ class VectorStore:
         self._lock = threading.RLock()
         self._store = None
         # Will lazily connect on first use.
+
+    def _ensure_payload_indices(self, client) -> None:
+        """Create payload indexes on metadata.owner_id, metadata.session_id, and metadata.persistent for filtering."""
+        try:
+            from qdrant_client.http.models import PayloadSchemaType
+            client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name="metadata.owner_id",
+                field_schema=PayloadSchemaType.KEYWORD
+            )
+            client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name="metadata.session_id",
+                field_schema=PayloadSchemaType.KEYWORD
+            )
+            client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name="metadata.persistent",
+                field_schema=PayloadSchemaType.BOOL
+            )
+            logger.info(f"Created payload keyword/bool indices on Qdrant collection {self.collection_name} metadata.")
+        except Exception as e:
+            logger.warning(f"Payload index creation failed (might already exist): {e}")
 
     @property
     def store(self):
@@ -153,6 +176,7 @@ class VectorStore:
                                             )
                                     except Exception as e:
                                         logger.warning(f"Failed to verify Qdrant collection dimensions: {e}")
+                                self._ensure_payload_indices(client)
                                 break
                             except Exception as exc:
                                 if attempt == max_retries - 1:
@@ -237,18 +261,68 @@ class VectorStore:
             else:
                 raise Exception("Failed to add documents to vector store after multiple retries due to rate limiting.")
 
-    def search(self, query: str, k: int = RetrievalConfig.VECTOR_TOP_K) -> List[Document]:
-        """Semantic similarity search."""
+    def _build_filter(self, owner_id: str, session_id: str):
+        """Construct database-specific metadata filters for isolation."""
+        from langchain_qdrant import QdrantVectorStore
+        from langchain_chroma import Chroma
+
+        if isinstance(self.store, QdrantVectorStore):
+            from qdrant_client.http.models import Filter, FieldCondition, MatchValue
+            should_clauses = []
+            if session_id:
+                should_clauses.append(FieldCondition(key="metadata.session_id", match=MatchValue(value=session_id)))
+            should_clauses.append(
+                Filter(
+                    must=[
+                        FieldCondition(key="metadata.owner_id", match=MatchValue(value=owner_id)),
+                        FieldCondition(key="metadata.persistent", match=MatchValue(value=True))
+                    ]
+                )
+            )
+            return Filter(should=should_clauses)
+
+        elif isinstance(self.store, Chroma):
+            if session_id:
+                return {
+                    "$or": [
+                        {"session_id": {"$eq": session_id}},
+                        {
+                            "$and": [
+                                {"owner_id": {"$eq": owner_id}},
+                                {"persistent": {"$eq": True}}
+                            ]
+                        }
+                    ]
+                }
+            else:
+                return {
+                    "$and": [
+                        {"owner_id": {"$eq": owner_id}},
+                        {"persistent": {"$eq": True}}
+                    ]
+                }
+        return None
+
+    def search(
+        self,
+        query: str,
+        k: int = RetrievalConfig.VECTOR_TOP_K,
+        owner_id: str = "default_owner",
+        session_id: str = ""
+    ) -> List[Document]:
+        """Semantic similarity search scoped to owner and/or session documents."""
         if not query.strip():
             return []
 
+        db_filter = self._build_filter(owner_id, session_id)
+
         def _run_search():
             try:
-                results = self.store.similarity_search_with_relevance_scores(query, k=k)
+                results = self.store.similarity_search_with_relevance_scores(query, k=k, filter=db_filter)
                 return [d for d, _ in results]
             except Exception:
                 # Fallback if relevance scores not supported
-                return self.store.similarity_search(query, k=k)
+                return self.store.similarity_search(query, k=k, filter=db_filter)
 
         try:
             return _run_search()
@@ -264,18 +338,26 @@ class VectorStore:
                 return _run_search()
             raise e
 
-    def search_with_scores(self, query: str, k: int = RetrievalConfig.VECTOR_TOP_K):
-        """Return (Document, score) tuples sorted by similarity."""
+    def search_with_scores(
+        self,
+        query: str,
+        k: int = RetrievalConfig.VECTOR_TOP_K,
+        owner_id: str = "default_owner",
+        session_id: str = ""
+    ):
+        """Return (Document, score) tuples sorted by similarity, scoped to owner and/or session."""
+        db_filter = self._build_filter(owner_id, session_id)
+
         def _run_search_with_scores():
             try:
-                results = self.store.similarity_search_with_score(query, k=k)
+                results = self.store.similarity_search_with_score(query, k=k, filter=db_filter)
                 # Normalize depending on vector store response (Qdrant uses cosine/dot, Chroma uses distance)
                 from langchain_qdrant import QdrantVectorStore
                 if isinstance(self.store, QdrantVectorStore):
                     return [(d, float(s)) for d, s in results]
                 return [(d, 1.0 - (s / 2.0)) for d, s in results]
             except Exception:
-                docs = self.store.similarity_search(query, k=k)
+                docs = self.store.similarity_search(query, k=k, filter=db_filter)
                 return [(d, 1.0 / (i + 1)) for i, d in enumerate(docs)]
 
         try:
@@ -340,6 +422,7 @@ class VectorStore:
                         )
                     )
                     logger.info(f"Recreated Qdrant collection after clear: {self.collection_name}")
+                    self._ensure_payload_indices(self.store.client)
                 else:
                     self.store.delete_collection()
             except Exception as e:

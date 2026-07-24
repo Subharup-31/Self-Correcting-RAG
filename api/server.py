@@ -25,7 +25,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Request
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
@@ -40,6 +40,12 @@ from config import APIKeys, DOCUMENTS_DIR, ServerConfig
 async def lifespan(app: FastAPI):
     """On startup, rebuild BM25 from existing Qdrant/Chroma documents."""
     try:
+        # Load the embeddings first on the main thread to prevent PyTorch background thread hangs
+        from retrieval.vector_store import get_embeddings
+        logger.info("Pre-loading embeddings model on main thread...")
+        get_embeddings()
+        logger.info("Embeddings model pre-loaded successfully.")
+
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, _rebuild_bm25_from_store)
     except Exception as exc:
@@ -48,13 +54,18 @@ async def lifespan(app: FastAPI):
 
 
 def _rebuild_bm25_from_store():
-    """Pull all stored documents from the vector store and rebuild BM25."""
+    """Pull all stored documents from the vector store and rebuild BM25 if not cached on disk."""
     try:
         from retrieval.vector_store import get_vector_store
         from retrieval.bm25_retriever import get_bm25_retriever
         from langchain_core.documents import Document
-        vs = get_vector_store()
         
+        bm25 = get_bm25_retriever()
+        if bm25.documents:
+            logger.info(f"BM25 index successfully recovered from disk cache ({len(bm25.documents)} documents). Skipping vector store scroll.")
+            return
+
+        vs = get_vector_store()
         from langchain_qdrant import QdrantVectorStore
         docs = []
         if isinstance(vs.store, QdrantVectorStore):
@@ -91,16 +102,12 @@ def _rebuild_bm25_from_store():
                 ]
 
         if docs:
-            get_bm25_retriever().update(docs)
+            bm25.update(docs)
             logger.info(f"BM25 cold-start repopulated with {len(docs)} docs successfully.")
         else:
             logger.info("BM25 cold-start: no existing documents found in vector store.")
     except Exception as exc:
         logger.warning(f"BM25 repopulation skipped: {exc}")
-
-
-
-# ---------------------------------------------------------------- #
 # App setup
 # ---------------------------------------------------------------- #
 app = FastAPI(
@@ -126,6 +133,8 @@ app.add_middleware(
 class QueryRequest(BaseModel):
     query: str = Field(..., description="The user's question")
     stream: bool = Field(False, description="If true, use the SSE endpoint instead")
+    owner_id: str = Field("default_owner", description="Owner ID of the user querying")
+    session_id: str = Field("", description="Session ID for isolated temp docs")
 
 
 class FeedbackRequest(BaseModel):
@@ -142,6 +151,7 @@ class QueryResponse(BaseModel):
     low_confidence: bool
     clarification_needed: bool
     clarification_question: Optional[str] = None
+    clarification_options: Optional[List[str]] = None
     contradiction_found: bool
     contradiction_detail: Optional[str] = None
     crag_state: str
@@ -155,13 +165,19 @@ class QueryResponse(BaseModel):
 
 def _state_to_response(state: dict) -> QueryResponse:
     """Convert a final GraphState into an API response."""
+    is_clarification = bool(state.get("clarification_needed", False))
+    ans = "Opted to solicit clarification before proceeding" if is_clarification else state.get("generation", "")
+    if not ans and not is_clarification:
+        ans = "No answer generated."
+
     return QueryResponse(
         query=state.get("question", ""),
-        answer=state.get("generation", ""),
+        answer=ans,
         confidence_score=float(state.get("confidence_score", 0.0)),
         low_confidence=bool(state.get("low_confidence", False)),
-        clarification_needed=bool(state.get("clarification_needed", False)),
+        clarification_needed=is_clarification,
         clarification_question=state.get("clarification_question") or None,
+        clarification_options=state.get("clarification_options") or None,
         contradiction_found=bool(state.get("contradiction_found", False)),
         contradiction_detail=state.get("contradiction_detail") or None,
         crag_state=state.get("crag_state", ""),
@@ -177,14 +193,14 @@ def _state_to_response(state: dict) -> QueryResponse:
 # ---------------------------------------------------------------- #
 # Lazy import of heavy pipeline (so /health works without models loaded)
 # ---------------------------------------------------------------- #
-def _run_query(question: str) -> dict:
+def _run_query(question: str, owner_id: str = "default_owner", session_id: str = "") -> dict:
     from graph.graph import run_query
-    return run_query(question)
+    return run_query(question, owner_id=owner_id, session_id=session_id)
 
 
-def _stream_query(question: str):
+def _stream_query(question: str, owner_id: str = "default_owner", session_id: str = ""):
     from graph.graph import stream_query
-    yield from stream_query(question)
+    yield from stream_query(question, owner_id=owner_id, session_id=session_id)
 
 
 # ---------------------------------------------------------------- #
@@ -218,8 +234,13 @@ async def root():
 
 
 @app.post("/api/upload")
-async def upload_documents(files: List[UploadFile] = File(...)):
-    """Upload and ingest one or more documents."""
+async def upload_documents(
+    files: List[UploadFile] = File(...),
+    owner_id: str = Form("default_owner"),
+    session_id: str = Form(""),
+    persistent: bool = Form(True)
+):
+    """Upload and ingest one or more documents, scoped to a user/session."""
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
 
@@ -234,8 +255,16 @@ async def upload_documents(files: List[UploadFile] = File(...)):
                              "error": f"File exceeds {MAX_FILE_SIZE_MB}MB limit"})
             continue
 
-        safe_name = f"{uuid.uuid4().hex[:8]}_{Path(f.filename).name}"
-        dest = DOCUMENTS_DIR / safe_name
+        # For temporary session documents, save them in a session-specific directory
+        if not persistent and session_id:
+            session_dir = DOCUMENTS_DIR / f"session_{session_id}"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            safe_name = f"{uuid.uuid4().hex[:8]}_{Path(f.filename).name}"
+            dest = session_dir / safe_name
+        else:
+            safe_name = f"{uuid.uuid4().hex[:8]}_{Path(f.filename).name}"
+            dest = DOCUMENTS_DIR / safe_name
+
         try:
             with dest.open("wb") as out:
                 out.write(content)
@@ -248,7 +277,7 @@ async def upload_documents(files: List[UploadFile] = File(...)):
         try:
             from ingestion.pipeline import ingest_file
             summary = await asyncio.get_event_loop().run_in_executor(
-                None, ingest_file, str(dest)
+                None, ingest_file, str(dest), owner_id, session_id, persistent
             )
             results.append({
                 "file": f.filename,
@@ -266,12 +295,12 @@ async def upload_documents(files: List[UploadFile] = File(...)):
 
 @app.post("/api/query", response_model=QueryResponse)
 async def query(req: QueryRequest):
-    """Run a query through the full self-correcting pipeline."""
+    """Run a query through the full self-correcting pipeline, with retrieval isolation."""
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
     try:
         state = await asyncio.get_event_loop().run_in_executor(
-            None, _run_query, req.query
+            None, _run_query, req.query, req.owner_id, req.session_id
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Query failed")
@@ -280,21 +309,15 @@ async def query(req: QueryRequest):
 
 
 @app.get("/api/query/stream")
-async def query_stream(request: Request, q: str = ""):
-    """SSE stream of the pipeline trace for a query."""
+async def query_stream(request: Request, q: str = "", owner_id: str = "default_owner", session_id: str = ""):
+    """SSE stream of the pipeline trace for a query, with retrieval isolation."""
     if not q.strip():
         raise HTTPException(status_code=400, detail="Missing 'q' query parameter")
 
     async def event_generator():
-        def run_sync():
-            for event in _stream_query(q):
-                return_event = event
-                # Run in executor to avoid blocking
-                return return_event
         # Stream from the sync generator
-        loop = asyncio.get_event_loop()
         try:
-            for event in _stream_query(q):
+            for event in _stream_query(q, owner_id=owner_id, session_id=session_id):
                 if await request.is_disconnected():
                     break
                 payload = json.dumps(event, default=str)
@@ -305,6 +328,16 @@ async def query_stream(request: Request, q: str = ""):
             yield f"data: {json.dumps({'node': '__error__', 'error': str(exc)})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.post("/api/sessions/cleanup")
+async def cleanup_session(session_id: str):
+    """Clean up and delete all temporary documents and vectors for a session."""
+    if not session_id or not session_id.strip():
+        raise HTTPException(status_code=400, detail="session_id cannot be empty")
+    from ingestion.lifecycle_manager import DocumentLifecycleManager
+    result = DocumentLifecycleManager.cleanup_session(session_id)
+    return result
 
 
 @app.post("/api/feedback")
@@ -346,6 +379,18 @@ async def evaluate():
         "baseline_metrics": result.get("baseline_metrics"),
         "ultimate_metrics": result.get("ultimate_metrics"),
     }
+
+
+@app.get("/api/evaluate/extended")
+async def evaluate_extended(owner_id: str = "eval_user", session_id: str = ""):
+    """Run the production-grade benchmark evaluation runner and compute precision/recall/faithfulness/etc."""
+    from evaluation.evaluator import EvaluationRunner
+    runner = EvaluationRunner()
+    result = await asyncio.get_event_loop().run_in_executor(
+        None, runner.run_benchmark, owner_id, session_id
+    )
+    return result
+
 
 
 @app.delete("/api/documents")

@@ -139,6 +139,21 @@ class FewShotLearner:
     # ------------------------------------------------------------------ #
     # Persistence (JSON sidecar — keeps examples portable & inspectable)
     # ------------------------------------------------------------------ #
+    def count_in_vector_store(self) -> int:
+        """Count the number of items stored in the few-shot vector store."""
+        try:
+            vs = self._get_vector_store()
+            from langchain_qdrant import QdrantVectorStore
+            if isinstance(vs, QdrantVectorStore):
+                return vs.client.count(FEWSHOT_COLLECTION).count
+            else:
+                # Chroma path
+                stored = vs.get()
+                return len(stored.get("ids", [])) if stored else 0
+        except Exception as exc:
+            logger.debug(f"Could not count few-shot vector store: {exc}")
+            return 0
+
     def _load(self) -> None:
         try:
             import pathlib
@@ -147,8 +162,24 @@ class FewShotLearner:
                 data = json.loads(p.read_text(encoding="utf-8"))
                 self._examples = [FewShotExample(**e) for e in data]
                 logger.info(f"Loaded {len(self._examples)} few-shot examples from {p}")
+                
+                # Check and synchronize vector database if empty but JSON is populated
+                try:
+                    if self._examples and self.count_in_vector_store() == 0:
+                        logger.info("Few-shot vector store is empty. Synchronizing from JSON...")
+                        vs = self._get_vector_store()
+                        vs.add_texts(
+                            texts=[ex.query for ex in self._examples],
+                            metadatas=[ex.model_dump() for ex in self._examples],
+                            ids=[ex.example_id for ex in self._examples]
+                        )
+                        logger.info(f"Synchronized {len(self._examples)} examples to vector store.")
+                except Exception as sync_exc:
+                    logger.warning(f"Failed to synchronize few-shot vector store on startup: {sync_exc}")
             else:
                 self._load_from_vector_store()
+                if self._examples:
+                    self._save()
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"Could not load few-shot store: {exc}")
             self._examples = []
@@ -231,10 +262,10 @@ class FewShotLearner:
         )
         with self._lock:
             self._examples.append(example)
-            # Incremental insert into ChromaDB.
+            # Incremental insert into ChromaDB, embedding only the query string
             try:
                 self._get_vector_store().add_texts(
-                    texts=[example.to_text()],
+                    texts=[example.query],
                     metadatas=[example.model_dump()],
                     ids=[example.example_id],
                 )

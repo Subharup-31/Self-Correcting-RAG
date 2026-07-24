@@ -71,20 +71,31 @@ def get_answer_chain():
 
 def grade_answer(state: GraphState) -> GraphState:
     """Grade whether the answer addresses the question."""
+    import time
+    from config import LLMTimeoutConfig
+    from llm import invoke_chain_safe, record_audit_event
+
+    start_time = time.time()
     question = state["question"]
     generation = state.get("generation", "")
-    logger.info(f"---GRADE ANSWER--- for '{question[:50]}'")
+    logger.info(f"[AnswerGrader] START for '{question[:50]}'")
 
     try:
-        result: AnswerGrade = get_answer_chain().invoke(
-            {"question": question, "generation": generation}
+        chain = get_answer_chain()
+        result, was_cached = invoke_chain_safe(
+            chain,
+            {"question": question, "generation": generation},
+            timeout_seconds=LLMTimeoutConfig.ANSWER_GRADER_TIMEOUT,
+            node_name="AnswerGrader"
         )
         addresses = bool(result.addresses)
     except Exception as exc:  # noqa: BLE001
-        logger.warning(f"Answer grader failed: {exc}")
+        logger.warning(f"[AnswerGrader] FAILED ({exc}). Fallback: addresses=True")
+        record_audit_event("fallback", f"AnswerGrader ({exc})")
         addresses = True  # fail open
 
-    logger.info(f"---ANSWER ADDRESSES QUESTION: {addresses}---")
+    elapsed_ms = int((time.time() - start_time) * 1000)
+    logger.info(f"[AnswerGrader] DONE ({elapsed_ms} ms) -> addresses={addresses}")
     return {"answer_addresses_question": addresses}
 
 

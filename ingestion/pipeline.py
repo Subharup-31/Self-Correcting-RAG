@@ -24,18 +24,46 @@ from loguru import logger
 
 from ingestion.chunking import ParentChildChunker
 from ingestion.document_loader import DocumentLoader
+from ingestion.parent_store import save_parents, clear_parents
 from retrieval.bm25_retriever import get_bm25_retriever
 from retrieval.vector_store import get_vector_store
 
 
-def ingest_documents(documents: List[Document]) -> dict:
-    """Chunk and index a list of already-loaded Documents."""
+def ingest_documents(
+    documents: List[Document],
+    owner_id: str = "default_owner",
+    session_id: str = "",
+    persistent: bool = True
+) -> dict:
+    """Chunk and index a list of already-loaded Documents with owner and session metadata."""
     if not documents:
         return {"loaded": 0, "parents": 0, "children": 0, "seconds": 0.0}
 
+    import uuid
+    import datetime
+
     start = time.time()
+    
+    # Enrich metadata for each document
+    for doc in documents:
+        doc.metadata["owner_id"] = owner_id
+        doc.metadata["session_id"] = session_id
+        doc.metadata["persistent"] = persistent
+        doc.metadata["uploaded_at"] = doc.metadata.get(
+            "uploaded_at",
+            datetime.datetime.now(datetime.timezone.utc).isoformat()
+        )
+        if "document_id" not in doc.metadata:
+            doc.metadata["document_id"] = str(uuid.uuid4())
+        # Track filename if path is available
+        if "source" not in doc.metadata:
+            doc.metadata["source"] = doc.metadata.get("file_name", "unknown")
+
     chunker = ParentChildChunker()
     children, parents = chunker.chunk(documents)
+
+    # Save parents to SQLite store
+    save_parents(parents)
 
     vs = get_vector_store()
     vs.add_documents(children)
@@ -56,31 +84,43 @@ def ingest_documents(documents: List[Document]) -> dict:
     return summary
 
 
-def ingest_file(path: str) -> dict:
-    """Load, chunk, and index a single file."""
+def ingest_file(
+    path: str,
+    owner_id: str = "default_owner",
+    session_id: str = "",
+    persistent: bool = True
+) -> dict:
+    """Load, chunk, and index a single file with context metadata."""
     logger.info(f"---INGEST FILE: {path}---")
     docs = DocumentLoader().load(path)
     if not docs:
         return {"loaded": 0, "parents": 0, "children": 0, "seconds": 0.0,
                 "error": "no documents extracted"}
-    return ingest_documents(docs)
+    return ingest_documents(docs, owner_id=owner_id, session_id=session_id, persistent=persistent)
 
 
-def ingest_directory(path: str) -> dict:
-    """Load, chunk, and index all supported files in a directory."""
+def ingest_directory(
+    path: str,
+    owner_id: str = "default_owner",
+    session_id: str = "",
+    persistent: bool = True
+) -> dict:
+    """Load, chunk, and index all supported files in a directory with context metadata."""
     logger.info(f"---INGEST DIRECTORY: {path}---")
     docs = DocumentLoader().load_directory(path)
     if not docs:
         return {"loaded": 0, "parents": 0, "children": 0, "seconds": 0.0,
                 "error": "no documents found"}
-    return ingest_documents(docs)
+    return ingest_documents(docs, owner_id=owner_id, session_id=session_id, persistent=persistent)
 
 
 def reset_stores() -> None:
-    """Wipe both the vector store and BM25 index."""
+    """Wipe both the vector store, parent store and BM25 index."""
     get_vector_store().clear()
     get_bm25_retriever().clear()
+    clear_parents()
     logger.info("All stores reset.")
+
 
 
 def get_ingestion_stats() -> dict:

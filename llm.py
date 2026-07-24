@@ -152,3 +152,135 @@ def get_generation_llm():
 def get_hyde_llm():
     """LLM for HyDE hypothetical-document generation (more creative)."""
     return get_llm(temperature=LLMConfig.HYDE_TEMPERATURE)
+
+
+# ============================================================
+# Request-Local Cache & Execution Audit (per single query run)
+# ============================================================
+import concurrent.futures
+import contextvars
+import hashlib
+import json
+import time
+from typing import Any, Tuple
+
+_request_llm_cache: contextvars.ContextVar[dict | None] = contextvars.ContextVar("_request_llm_cache", default=None)
+_request_audit_log: contextvars.ContextVar[dict | None] = contextvars.ContextVar("_request_audit_log", default=None)
+
+
+def start_request_context() -> None:
+    """Initialize request-local cache and audit trackers for a single query execution."""
+    _request_llm_cache.set({})
+    _request_audit_log.set({
+        "llm_calls": 0,
+        "skipped_nodes": [],
+        "fallbacks": [],
+        "telemetry": [],
+    })
+
+
+def get_request_audit() -> dict:
+    audit = _request_audit_log.get()
+    if audit is None:
+        return {"llm_calls": 0, "skipped_nodes": [], "fallbacks": [], "telemetry": []}
+    return audit
+
+
+def record_audit_event(event_type: str, detail: str, telemetry_data: dict | None = None) -> None:
+    audit = _request_audit_log.get()
+    if audit is not None:
+        if event_type == "llm_call":
+            audit["llm_calls"] = audit.get("llm_calls", 0) + 1
+        elif event_type == "skip":
+            if detail not in audit["skipped_nodes"]:
+                audit["skipped_nodes"].append(detail)
+        elif event_type == "fallback":
+            if detail not in audit["fallbacks"]:
+                audit["fallbacks"].append(detail)
+        elif event_type == "telemetry" and telemetry_data:
+            audit["telemetry"].append(telemetry_data)
+
+
+# Global shared ThreadPoolExecutor bounded to 16 workers (prevents per-call thread churn)
+_GLOBAL_LLM_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=16,
+    thread_name_prefix="global_llm_worker"
+)
+
+
+def invoke_chain_safe(chain, inputs: dict, timeout_seconds: float, node_name: str) -> Tuple[Any, bool]:
+    """Execute an LLM chain with native request timeout and global shared ThreadPoolExecutor bounds.
+
+    Enforces real timeout bounds so stuck network requests raise TimeoutError immediately.
+    Returns (result, was_cached).
+    """
+    start_t = time.time()
+    provider_name = LLMConfig.PROVIDER
+    cache = _request_llm_cache.get()
+    cache_key = None
+
+    if cache is not None:
+        try:
+            inputs_str = json.dumps(inputs, sort_keys=True, default=str)
+            key_raw = f"{node_name}:{inputs_str}"
+            cache_key = hashlib.md5(key_raw.encode("utf-8")).hexdigest()
+            if cache_key in cache:
+                dur_ms = int((time.time() - start_t) * 1000)
+                logger.info(f"[{node_name}] CACHE HIT ({provider_name}, {dur_ms} ms)")
+                record_audit_event("telemetry", None, {
+                    "node": node_name,
+                    "duration_ms": dur_ms,
+                    "provider": provider_name,
+                    "cached": True,
+                    "timeout": False,
+                    "fallback": False,
+                })
+                return cache[cache_key], True
+        except Exception:
+            cache_key = None
+
+    record_audit_event("llm_call", node_name)
+
+    bound_chain = chain.with_config(config={"timeout": timeout_seconds})
+
+    def _exec():
+        return bound_chain.invoke(inputs)
+
+    future = _GLOBAL_LLM_EXECUTOR.submit(_exec)
+    try:
+        res = future.result(timeout=timeout_seconds)
+        dur_ms = int((time.time() - start_t) * 1000)
+        if cache is not None and cache_key is not None:
+            cache[cache_key] = res
+        record_audit_event("telemetry", None, {
+            "node": node_name,
+            "duration_ms": dur_ms,
+            "provider": provider_name,
+            "cached": False,
+            "timeout": False,
+            "fallback": False,
+        })
+        return res, False
+    except concurrent.futures.TimeoutError as exc:
+        dur_ms = int((time.time() - start_t) * 1000)
+        logger.warning(f"[{node_name}] HARD TIMEOUT after {timeout_seconds}s ({provider_name}, {dur_ms} ms)")
+        record_audit_event("telemetry", None, {
+            "node": node_name,
+            "duration_ms": dur_ms,
+            "provider": provider_name,
+            "cached": False,
+            "timeout": True,
+            "fallback": True,
+        })
+        raise TimeoutError(f"Hard timeout of {timeout_seconds}s exceeded for {node_name}") from exc
+    except Exception as exc:
+        dur_ms = int((time.time() - start_t) * 1000)
+        record_audit_event("telemetry", None, {
+            "node": node_name,
+            "duration_ms": dur_ms,
+            "provider": provider_name,
+            "cached": False,
+            "timeout": False,
+            "fallback": True,
+        })
+        raise

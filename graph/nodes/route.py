@@ -70,19 +70,50 @@ def get_router_chain():
     return _router_chain
 
 
+_GREETING_PATTERNS = {
+    "hi", "hello", "hey", "good morning", "good afternoon", "good evening",
+    "thanks", "thank you", "bye", "goodbye", "howdy", "sup"
+}
+
+
 def route_question(state: GraphState) -> GraphState:
     """Classify the question and record the chosen route in state."""
-    question = state["question"]
-    logger.info(f"---ROUTE QUESTION--- {question[:60]}")
+    import time
+    from config import LLMTimeoutConfig
+    from llm import invoke_chain_safe, record_audit_event
+
+    start_time = time.time()
+    raw_q = state["question"].strip().lower().rstrip(".!?")
+    logger.info("[Router] START")
+
+    # Fast-path for simple greetings to save 1 LLM API call
+    if raw_q in _GREETING_PATTERNS:
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        logger.info(f"[Router] DONE ({elapsed_ms} ms) - Fast-path direct_llm")
+        record_audit_event("skip", "Router LLM (Fast-path)")
+        techniques = list(state.get("techniques_used", []))
+        if "Routing" not in techniques:
+            techniques.append("Routing")
+        return {"route": "direct_llm", "techniques_used": techniques}
+
     try:
-        result: RouteQuery = get_router_chain().invoke({"question": question})
+        chain = get_router_chain()
+        result, was_cached = invoke_chain_safe(
+            chain,
+            {"question": state["question"]},
+            timeout_seconds=LLMTimeoutConfig.ROUTER_TIMEOUT,
+            node_name="Router"
+        )
         route = result.datasource
         reason = result.reason
     except Exception as exc:  # noqa: BLE001
-        logger.warning(f"Router failed, defaulting to vectorstore: {exc}")
+        logger.warning(f"[Router] FAILED ({exc}). Fallback: vectorstore")
+        record_audit_event("fallback", f"Router ({exc})")
         route, reason = "vectorstore", "router fallback"
 
-    logger.info(f"---ROUTE: {route} ({reason})---")
+    elapsed_ms = int((time.time() - start_time) * 1000)
+    logger.info(f"[Router] DONE ({elapsed_ms} ms) -> route={route} ({reason})")
+
     techniques = list(state.get("techniques_used", []))
     if "Routing" not in techniques:
         techniques.append("Routing")

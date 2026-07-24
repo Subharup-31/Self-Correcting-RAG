@@ -32,8 +32,10 @@ def retrieve(state: GraphState, retriever: HybridRetriever,
     question = state["question"]
     sub_questions: List[str] = state.get("sub_questions", []) or []
     techniques = list(state.get("techniques_used", []))
+    owner_id = state.get("owner_id", "default_owner")
+    session_id = state.get("session_id", "")
 
-    logger.info(f"---RETRIEVE--- question='{question[:50]}' subs={len(sub_questions)}")
+    logger.info(f"---RETRIEVE--- question='{question[:50]}' owner={owner_id} session={session_id} subs={len(sub_questions)}")
 
     all_docs: List[Document] = []
     seen_keys = set()
@@ -48,23 +50,38 @@ def retrieve(state: GraphState, retriever: HybridRetriever,
     # Primary retrieval — HyDE first (more precise), plain hybrid as backup.
     if use_hyde and hyde is not None:
         try:
-            docs = hyde.retrieve(question, top_k=6)
+            docs = hyde.retrieve(question, top_k=6, owner_id=owner_id, session_id=session_id)
             _collect(docs)
             if "HyDE" not in techniques:
                 techniques.append("HyDE")
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"HyDE failed, using plain hybrid: {exc}")
-            _collect(retriever.retrieve(question, top_k=6))
+            _collect(retriever.retrieve(question, top_k=6, owner_id=owner_id, session_id=session_id))
     else:
-        _collect(retriever.retrieve(question, top_k=6))
+        _collect(retriever.retrieve(question, top_k=6, owner_id=owner_id, session_id=session_id))
 
-    # Sub-question retrieval (from query decomposition).
+    # Sub-question retrieval (from query decomposition) executed in parallel to keep latency low.
+    unique_subs = []
+    q_norm = question.strip().lower()
     for sq in sub_questions:
-        if sq.strip() and sq != question:
+        sq_clean = sq.strip()
+        if sq_clean and sq_clean.lower() != q_norm and sq_clean not in unique_subs:
+            unique_subs.append(sq_clean)
+
+    if unique_subs:
+        import concurrent.futures
+        def _fetch_sub(sq_text: str):
             try:
-                _collect(retriever.retrieve(sq, top_k=4))
+                return retriever.retrieve(sq_text, top_k=4, owner_id=owner_id, session_id=session_id)
             except Exception as exc:  # noqa: BLE001
-                logger.warning(f"Sub-question retrieve failed for '{sq}': {exc}")
+                logger.warning(f"Sub-question retrieve failed for '{sq_text}': {exc}")
+                return []
+
+        max_w = min(len(unique_subs), 4)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_w) as executor:
+            sub_results = list(executor.map(_fetch_sub, unique_subs))
+        for sub_docs in sub_results:
+            _collect(sub_docs)
 
     if "Hybrid Retrieval (BM25+Vector+RRF)" not in techniques:
         techniques.append("Hybrid Retrieval (BM25+Vector+RRF)")

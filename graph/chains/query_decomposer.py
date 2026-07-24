@@ -76,16 +76,32 @@ _decompose_chain = None
 
 def decompose_query(query: str) -> List[str]:
     """Decompose a complex query into atomic sub-questions."""
+    import time
+    from config import LLMTimeoutConfig
+    from llm import invoke_chain_safe, record_audit_event
+
+    start_time = time.time()
     if not is_complex_query(query):
-        logger.debug(f"Query not complex, skipping decomposition: {query[:50]}")
+        logger.debug(f"[QueryDecomposer] SKIPPED (not complex query)")
+        record_audit_event("skip", "Query Decomposer")
         return []
+
+    logger.info("[QueryDecomposer] START")
     try:
-        result: SubQueries = build_decompose_chain().invoke({"query": query})
+        chain = build_decompose_chain()
+        result, was_cached = invoke_chain_safe(
+            chain,
+            {"query": query},
+            timeout_seconds=LLMTimeoutConfig.DECOMPOSER_TIMEOUT,
+            node_name="QueryDecomposer"
+        )
         subs = [q.strip() for q in result.questions if q.strip()]
-        logger.info(f"Decomposed '{query[:50]}' → {len(subs)} sub-queries")
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        logger.info(f"[QueryDecomposer] DONE ({elapsed_ms} ms) -> {len(subs)} sub-queries")
         return subs
     except Exception as exc:  # noqa: BLE001
-        logger.warning(f"Decomposition failed: {exc}")
+        logger.warning(f"[QueryDecomposer] FAILED ({exc}). Fallback: original query")
+        record_audit_event("fallback", f"QueryDecomposer ({exc})")
         return []
 
 

@@ -48,21 +48,40 @@ class HyDERetriever:
 
     def generate_hypothetical_document(self, query: str) -> str:
         """Ask the LLM to produce a hypothetical answer passage."""
+        import time
+        from config import LLMTimeoutConfig
+        from llm import invoke_chain_safe, record_audit_event
+
+        start_time = time.time()
+        logger.info("[HyDE] START")
         chain = self.prompt | self.llm
         try:
-            response = chain.invoke({"question": query})
+            response, was_cached = invoke_chain_safe(
+                chain,
+                {"question": query},
+                timeout_seconds=LLMTimeoutConfig.HYDE_TIMEOUT,
+                node_name="HyDE"
+            )
             content = response.content if hasattr(response, "content") else response
             if isinstance(content, list):
                 text = "".join(chunk.get("text", "") if isinstance(chunk, dict) else str(chunk) for chunk in content)
             else:
                 text = str(content)
-            logger.debug(f"HyDE hypothetical doc: {text[:120]}...")
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            logger.info(f"[HyDE] DONE ({elapsed_ms} ms)")
             return text.strip()
         except Exception as exc:  # noqa: BLE001
-            logger.warning(f"HyDE generation failed, falling back to raw query: {exc}")
+            logger.warning(f"[HyDE] FAILED ({exc}). Fallback: original query")
+            record_audit_event("fallback", f"HyDE ({exc})")
             return query
 
-    def retrieve(self, query: str, top_k: int = 6) -> List[Document]:
+    def retrieve(
+        self,
+        query: str,
+        top_k: int = 6,
+        owner_id: str = "default_owner",
+        session_id: str = ""
+    ) -> List[Document]:
         """HyDE pipeline: generate hypothetical doc → retrieve real docs.
 
         Falls back gracefully to plain retrieval if hypothetical generation fails.
@@ -70,7 +89,14 @@ class HyDERetriever:
         hyde_doc = self.generate_hypothetical_document(query)
         # If HyDE produced nothing usable, fall back to the original query.
         search_query = hyde_doc if len(hyde_doc) > 20 else query
-        results = self.retriever.retrieve(search_query, top_k=top_k)
+        results = self.retriever.retrieve(
+            query,
+            top_k=top_k,
+            owner_id=owner_id,
+            session_id=session_id,
+            vector_query=search_query,
+            bm25_query=query,
+        )
         for d in results:
             d.metadata.setdefault("technique", "HyDE")
         logger.info(f"HyDE retrieve '{query[:40]}...': {len(results)} docs")
