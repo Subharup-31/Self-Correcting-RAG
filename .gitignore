@@ -41,3 +41,9 @@ frontend/out/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Log and local runtime state
+*.log
+*.db
+*.pkl
+
