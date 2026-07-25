@@ -21,8 +21,9 @@ const GithubIcon = (props: React.SVGProps<SVGSVGElement>) => (
 
 export default function LandingPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const [email, setEmail] = useState("");
-  const [subscribed, setSubscribed] = useState(false);
+  const [queryIndex, setQueryIndex] = useState(0);
+  const [displayText, setDisplayText] = useState("");
+  const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -105,14 +106,39 @@ export default function LandingPage() {
     };
   }, []);
 
-  const handleSubscribe = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (email.trim()) {
-      setSubscribed(true);
-      setEmail("");
-      setTimeout(() => setSubscribed(false), 3000);
+  const COMPLEX_QUERIES = [
+    "What is HyDE and how does it improve retrieval precision?",
+    "Are there contradictory terms in the Q4 financial agreements?",
+    "How does the CRAG node grade retrieved context quality?",
+    "Summarize the technical manual's section on system failure recovery.",
+    "Check the ingested documents for Q3 performance metrics conflicts."
+  ];
+
+  useEffect(() => {
+    const fullText = COMPLEX_QUERIES[queryIndex];
+    let timer: NodeJS.Timeout;
+
+    if (isDeleting) {
+      timer = setTimeout(() => {
+        setDisplayText((prev) => prev.slice(0, -1));
+      }, 25);
+    } else {
+      timer = setTimeout(() => {
+        setDisplayText(fullText.slice(0, displayText.length + 1));
+      }, 40);
     }
-  };
+
+    if (!isDeleting && displayText === fullText) {
+      timer = setTimeout(() => setIsDeleting(true), 3500);
+    }
+
+    if (isDeleting && displayText === "") {
+      setIsDeleting(false);
+      setQueryIndex((prev) => (prev + 1) % COMPLEX_QUERIES.length);
+    }
+
+    return () => clearTimeout(timer);
+  }, [displayText, isDeleting, queryIndex]);
 
   return (
     <div className="bg-black text-white min-h-screen flex flex-col font-sans select-none overflow-x-hidden">
@@ -178,27 +204,20 @@ export default function LandingPage() {
             Retrieve without <span className="italic">hallucination</span>.
           </h1>
 
-          {/* Email Subscription Form */}
-          <form onSubmit={handleSubscribe} className="max-w-xl w-full mb-6">
-            <div className="liquid-glass rounded-full pl-6 pr-2 py-2 flex items-center justify-between gap-3 border border-white/5">
-              <input
-                type="email"
-                placeholder={subscribed ? "Thanks for subscribing!" : "Get updates on new releases"}
-                disabled={subscribed}
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className="bg-transparent border-none outline-none flex-1 text-white text-sm placeholder:text-white/40 focus:ring-0 focus:outline-none"
-                required
-              />
-              <button 
-                type="submit" 
-                disabled={subscribed}
-                className="bg-white rounded-full p-3 text-black hover:bg-white/90 transition-all flex items-center justify-center shrink-0 cursor-pointer disabled:bg-emerald-500 disabled:text-white"
-              >
+          {/* Simulated Query Typing Box */}
+          <div className="max-w-xl w-full mb-6">
+            <div className="liquid-glass rounded-full pl-6 pr-2 py-2 flex items-center justify-between gap-3 border border-white/5 text-left">
+              <div className="flex-1 text-white text-sm flex items-center overflow-hidden h-9">
+                <span className="truncate text-white/90 font-light select-none">
+                  {displayText || <span className="text-white/30">Ask our agentic RAG...</span>}
+                </span>
+                <span className="inline-block w-[2px] h-4 bg-white/80 ml-1 animate-pulse" />
+              </div>
+              <div className="bg-white rounded-full p-3 text-black flex items-center justify-center shrink-0">
                 <ArrowRight className="w-5 h-5" />
-              </button>
+              </div>
             </div>
-          </form>
+          </div>
 
           {/* Subtitle */}
           <p className="text-white/70 text-xs md:text-sm leading-relaxed max-w-lg mb-8">

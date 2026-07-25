@@ -215,7 +215,44 @@ def _node_retrieve(state: GraphState) -> GraphState:
     if _is_comparison_query(question) and APIKeys.TAVILY_API_KEY:
         logger.info("[Retrieve] Comparison query detected — augmenting with web search.")
         try:
-            web_result = web_search(state)
+            # ── Targeted web query: only search for sub-queries that had NO local results ──
+            # This avoids sending the full comparison question to Tavily (which returns noisy,
+            # general results) and instead targets only the parts genuinely missing from the
+            # local vector store.
+            #
+            # Safety: falls back to original full question if:
+            #   - No sub-questions were decomposed (simple comparison query)
+            #   - ALL sub-questions already had local results (nothing missing externally)
+            sub_questions = state.get("sub_questions", [])
+            web_query = question  # default: original behaviour preserved
+
+            if sub_questions:
+                _hr = get_hybrid_retriever()
+                missing_subs = []
+                for sq in sub_questions:
+                    try:
+                        sq_docs = _hr.retrieve(sq, top_k=1, owner_id=owner_id, session_id=session_id)
+                        if not sq_docs:
+                            missing_subs.append(sq)
+                    except Exception:  # noqa: BLE001
+                        # If retrieval check fails for a sub-query, conservatively treat it
+                        # as missing so the web can fill the gap.
+                        missing_subs.append(sq)
+
+                if missing_subs:
+                    web_query = " ".join(missing_subs)
+                    logger.info(
+                        f"[Retrieve] Targeting web search at {len(missing_subs)} sub-query(ies) "
+                        f"not found locally: {missing_subs}"
+                    )
+                else:
+                    logger.info(
+                        "[Retrieve] All sub-queries had local results — "
+                        "web augmentation using full question as fallback."
+                    )
+
+            web_state = {**state, "question": web_query}
+            web_result = web_search(web_state)
             web_docs = web_result.get("documents", [])
             added = 0
             for doc in web_docs:

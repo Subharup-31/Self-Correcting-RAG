@@ -476,6 +476,7 @@ export default function Dashboard() {
   const [isClarifying, setIsClarifying] = useState(false);
   const [showTextInput, setShowTextInput] = useState(false);
   const [originalQuestion, setOriginalQuestion] = useState("");
+  const initialQueryRef = useRef(false);
 
   // Result state (for clarification logic)
   const [result, setResult] = useState<QueryResponse | null>(null);
@@ -504,6 +505,20 @@ export default function Dashboard() {
   useEffect(() => {
     fetchHealth();
     fetchStats();
+
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const q = params.get("q");
+      if (q && !initialQueryRef.current) {
+        initialQueryRef.current = true;
+        setQueryInput(q);
+        // Wait a brief moment to make sure everything is mounted
+        setTimeout(() => {
+          const fakeEvent = { preventDefault: () => {} } as React.FormEvent;
+          handleQuerySubmit(fakeEvent, q);
+        }, 500);
+      }
+    }
   }, []);
 
   // Scroll to bottom of trace log
